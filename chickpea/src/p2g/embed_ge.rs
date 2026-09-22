@@ -1,21 +1,24 @@
-//! Peak/gene/pb embeddings via `graph-embedding-util` FNE.
+//! Peak/gene/pb embeddings via `graph-embedding-util` hierarchical trainer.
 //!
-//! One `fne::train` over the [`crate::p2g::context_graph`]: the link relation
-//! and the pb levels' count relations share a table, so peaks and genes are
-//! placed by both their cis links and the pseudobulks that express them.
+//! Frozen pb units and sparse count axes (genes, peaks), not FNE count edges.
 
 use crate::common::Mat;
-use crate::p2g::context_graph::build_context_graph;
 use crate::p2g::link_map::PeakGeneEdge;
+use crate::p2g::module_init::{coarsen_profile_levels, init_gene_peak_partitions};
 use crate::p2g::pb_levels::PbLevels;
-use graph_embedding_util::fne::{train, FneConfig};
+use graph_embedding_util::data::Triplet;
+use graph_embedding_util::fit::hier::{
+    train_partitions, HierConfig, HierOutput, Partition, UnitTable,
+};
 use graph_embedding_util::save_embedding;
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::matrix::dense_mat_io::{axis_id_names, l2_normalize_rows_inplace};
 use legume_numeric::matrix::traits::ConvertMatOps;
 use log::info;
+use nalgebra::DMatrix;
+use std::sync::atomic::AtomicBool;
 
-/// Row embeddings after FNE training (CPU `[n, dim]` f32).
+/// Row embeddings after hierarchical training (CPU `[n, dim]` f32).
 #[derive(Clone, Debug)]
 pub struct PeakGeneEmbeds {
     pub peak: Vec<Vec<f32>>,
@@ -25,11 +28,11 @@ pub struct PeakGeneEmbeds {
     pub dim: usize,
     pub peak_names: Vec<Box<str>>,
     pub gene_names: Vec<Box<str>>,
+    /// `⌈n_units / units_per_step⌉` from the hier trainer (for smoke checks).
+    pub steps_per_epoch: usize,
 }
 
 impl PeakGeneEmbeds {
-    /// The finest pb rows, L2-normalized: the sample embedding that is
-    /// clustered and written as `cell_embedding`.
     pub fn finest_unit_rows(&self) -> Mat {
         let rows = &self.pb[0];
         let mut m = Mat::from_fn(rows.len(), self.dim, |i, d| rows[i][d]);
@@ -38,55 +41,136 @@ impl PeakGeneEmbeds {
     }
 }
 
-/// Train peak/gene/pb embeddings jointly: the scored link edges plus the
-/// pb levels' count relations (`bins` SIMBA levels per modality).
-pub fn train_peak_gene_embeds(
+/// Knobs for [`train_peak_gene_embeds`].
+#[derive(Clone, Debug)]
+pub struct HierEmbedConfig {
+    pub dim: usize,
+    pub epochs: usize,
+    pub seed: u64,
+    pub device: Device,
+    pub n_gene_modules: usize,
+    pub n_peak_modules: usize,
+    pub units_per_step: usize,
+    pub modules_per_unit: usize,
+    pub lr: f32,
+    pub merge_every: usize,
+    pub merge_cosine: f32,
+}
+
+impl Default for HierEmbedConfig {
+    fn default() -> Self {
+        Self {
+            dim: 32,
+            epochs: 10,
+            seed: 42,
+            device: Device::Cpu,
+            n_gene_modules: 128,
+            n_peak_modules: 128,
+            units_per_step: 256,
+            modules_per_unit: 8,
+            lr: 0.05,
+            merge_every: 0,
+            merge_cosine: 0.95,
+        }
+    }
+}
+
+fn profile_to_triplets(m: &Mat) -> Vec<Triplet> {
+    let mut out = Vec::new();
+    for s in 0..m.ncols() {
+        for f in 0..m.nrows() {
+            let c = m[(f, s)];
+            if c > 0.0 {
+                out.push(Triplet {
+                    cell: s as u32,
+                    feature: f as u32,
+                    count: c,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn build_units_and_partitions(
+    levels: &PbLevels,
+    gene_finest: &Mat,
     edges: &[PeakGeneEdge],
+    cfg: &HierEmbedConfig,
+) -> anyhow::Result<(UnitTable, Vec<Partition>)> {
+    let n_pb = levels.n_pb_per_level();
+    // Borrow the RNA levels when there are any; only the ATAC-only surrogate
+    // needs its coarse levels built here.
+    let coarsened;
+    let gene_levels: Vec<&Mat> = match &levels.rna {
+        Some(rna) => rna.iter().collect(),
+        None => {
+            coarsened = coarsen_profile_levels(gene_finest, &levels.parent);
+            coarsened.iter().collect()
+        }
+    };
+    anyhow::ensure!(
+        gene_levels.len() == levels.atac.len(),
+        "gene and ATAC level count mismatch"
+    );
+    for (l, (g, a)) in gene_levels.iter().zip(&levels.atac).enumerate() {
+        anyhow::ensure!(
+            g.ncols() == a.ncols() && g.ncols() == n_pb[l],
+            "level {l} sample count mismatch"
+        );
+    }
+
+    let gene_blobs: Vec<Vec<Triplet>> =
+        gene_levels.iter().map(|m| profile_to_triplets(m)).collect();
+    let peak_blobs: Vec<Vec<Triplet>> = levels.atac.iter().map(profile_to_triplets).collect();
+    let gene_blob_refs: Vec<&[Triplet]> = gene_blobs.iter().map(Vec::as_slice).collect();
+    let peak_blob_refs: Vec<&[Triplet]> = peak_blobs.iter().map(Vec::as_slice).collect();
+    let axis_blobs = [&gene_blob_refs[..], &peak_blob_refs[..]];
+    let n_features = [gene_finest.nrows(), levels.atac[0].nrows()];
+    let units = UnitTable::from_pseudobulk_axes(&axis_blobs, &n_pb, &n_features);
+    let (gene_part, peak_part) = init_gene_peak_partitions(
+        levels,
+        gene_finest,
+        edges,
+        cfg.n_gene_modules,
+        cfg.n_peak_modules,
+        cfg.seed,
+    )?;
+    Ok((units, vec![gene_part, peak_part]))
+}
+
+fn dmatrix_rows(m: &DMatrix<f32>) -> Vec<Vec<f32>> {
+    (0..m.nrows())
+        .map(|i| m.row(i).iter().copied().collect())
+        .collect()
+}
+
+fn hier_output_to_embeds(
+    out: &HierOutput,
     levels: &PbLevels,
     peak_names: &[Box<str>],
     gene_names: &[Box<str>],
-    bins: usize,
-    cfg: &FneConfig,
+    dim: usize,
 ) -> anyhow::Result<PeakGeneEmbeds> {
-    anyhow::ensure!(!edges.is_empty(), "no peak–gene edges to embed");
-    let n_peaks = peak_names.len();
-    let n_genes = gene_names.len();
-    let graph = build_context_graph(edges, levels, n_peaks, n_genes, bins)?;
-    info!(
-        "Context graph: {} node types, {} relations, {} edges (repeats {:?})",
-        graph.types.len(),
-        graph.rels.len(),
-        graph.edges.len(),
-        graph.repeats
-    );
-    let cfg = FneConfig {
-        relation_repeats: graph.repeats.clone(),
-        ..cfg.clone()
-    };
+    anyhow::ensure!(out.axes.len() >= 2, "expected gene and peak axes");
+    let gene = dmatrix_rows(&out.axes[0].rho);
+    let peak = dmatrix_rows(&out.axes[1].rho);
+    anyhow::ensure!(gene.len() == gene_names.len() && peak.len() == peak_names.len());
 
-    let out = train(graph.edges, graph.types, graph.rels, &cfg)?;
-    let types = &out.node_types;
-    let table = out.embedding.to_vec2::<f32>()?;
-    anyhow::ensure!(
-        table.len() == types.n_total(),
-        "embedding rows {} != nodes {}",
-        table.len(),
-        types.n_total()
-    );
-    let dim = cfg.dim;
-    anyhow::ensure!(
-        table.iter().all(|r| r.len() == dim),
-        "embedding width mismatch"
-    );
+    let n_pb = levels.n_pb_per_level();
+    let mut pb = Vec::with_capacity(n_pb.len());
+    let mut off = 0usize;
+    for &n in &n_pb {
+        let mut level = Vec::with_capacity(n);
+        for i in 0..n {
+            let row: Vec<f32> = (0..dim).map(|d| out.e_u[(off + i, d)]).collect();
+            level.push(row);
+        }
+        pb.push(level);
+        off += n;
+    }
+    anyhow::ensure!(off == out.e_u.nrows(), "unit row count vs pb levels");
 
-    // The table stacks the node types in order: peaks, genes, then each level.
-    let mut rows = table.into_iter();
-    let mut take = |n: usize| rows.by_ref().take(n).collect::<Vec<_>>();
-    let peak = take(n_peaks);
-    let gene = take(n_genes);
-    let pb: Vec<Vec<Vec<f32>>> = (0..levels.n_levels())
-        .map(|l| take(levels.n_pb(l)))
-        .collect();
     Ok(PeakGeneEmbeds {
         peak,
         gene,
@@ -94,13 +178,57 @@ pub fn train_peak_gene_embeds(
         dim,
         peak_names: peak_names.to_vec(),
         gene_names: gene_names.to_vec(),
+        steps_per_epoch: out.steps_per_epoch,
     })
 }
 
-/// Write `{prefix}.{peak,gene,cell}_embedding.parquet` via [`save_embedding`]:
-/// `cell` rows are the normalized finest pb rows, named `pb_{i}`. With more
-/// than one level, `{prefix}.pb_tree_embedding.parquet` holds every level's
-/// raw rows named `L{level}:{i}`.
+/// Train peak/gene/pb embeddings via hierarchical softmax over frozen pb units.
+pub fn train_peak_gene_embeds(
+    edges: &[PeakGeneEdge],
+    levels: &PbLevels,
+    peak_names: &[Box<str>],
+    gene_names: &[Box<str>],
+    gene_finest: &Mat,
+    cfg: &HierEmbedConfig,
+) -> anyhow::Result<PeakGeneEmbeds> {
+    anyhow::ensure!(!edges.is_empty(), "no peak–gene edges to embed");
+    let (units, partitions) = build_units_and_partitions(levels, gene_finest, edges, cfg)?;
+    let n_u = units.n_units();
+    info!(
+        "Hier embed: {n_u} frozen pb units, {} genes, {} peaks, M=[{}, {}], H={}",
+        gene_names.len(),
+        peak_names.len(),
+        partitions[0].n_modules(),
+        partitions[1].n_modules(),
+        cfg.dim
+    );
+    let stop = AtomicBool::new(false);
+    let hcfg = HierConfig {
+        n_modules: cfg.n_gene_modules,
+        epochs: cfg.epochs,
+        units_per_step: cfg.units_per_step,
+        modules_per_unit: cfg.modules_per_unit,
+        lr: cfg.lr,
+        weight_decay: 0.0,
+        seed: cfg.seed,
+        offset_l2: 0.0,
+        offset_rank: 1,
+        device: cfg.device.clone(),
+        merge_every: cfg.merge_every,
+        merge_cosine: cfg.merge_cosine,
+    };
+    let out = train_partitions(&units, &partitions, cfg.dim, &hcfg, None, &[], &stop)?;
+    info!(
+        "Hier embed finished: steps_per_epoch={} (⌈{n_u}/{}⌉)",
+        out.steps_per_epoch, cfg.units_per_step
+    );
+    hier_output_to_embeds(&out, levels, peak_names, gene_names, cfg.dim)
+}
+
+/// Write peak / gene / finest-pb embedding parquets.
+///
+/// Finest units are `{prefix}.pb_embedding.parquet`, not `cell_embedding`,
+/// because this path has no per-barcode projection onto the trained tables.
 pub fn write_embedding_parquets(prefix: &str, embeds: &PeakGeneEmbeds) -> anyhow::Result<()> {
     anyhow::ensure!(embeds.dim > 0, "empty embedding dim");
     anyhow::ensure!(
@@ -127,21 +255,21 @@ pub fn write_embedding_parquets(prefix: &str, embeds: &PeakGeneEmbeds) -> anyhow
         &embeds.gene_names,
         "gene",
     )?;
-    let cell = embeds.finest_unit_rows();
-    let cell_path = format!("{prefix}.cell_embedding.parquet");
+    let finest = embeds.finest_unit_rows();
+    let pb_path = format!("{prefix}.pb_embedding.parquet");
     save_embedding(
-        &cell_path,
-        &cell.to_tensor(&Device::Cpu)?,
-        &axis_id_names("pb_", cell.nrows()),
-        "cell",
+        &pb_path,
+        &finest.to_tensor(&Device::Cpu)?,
+        &axis_id_names("pb_", finest.nrows()),
+        "pb",
     )?;
     info!(
-        "Wrote embeddings: {peak_path} ({} × {}), {gene_path} ({} × {}), {cell_path} ({} × {})",
+        "Wrote embeddings: {peak_path} ({} × {}), {gene_path} ({} × {}), {pb_path} ({} × {})",
         embeds.peak.len(),
         embeds.dim,
         embeds.gene.len(),
         embeds.dim,
-        cell.nrows(),
+        finest.nrows(),
         embeds.dim
     );
 

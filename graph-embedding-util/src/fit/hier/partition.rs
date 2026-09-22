@@ -8,6 +8,7 @@ use crate::fit::config::TrackSpec;
 ///
 /// Multi-axis fits hold a `Vec<Partition>` (one per feature axis). Gene-only
 /// fits use a single partition over genes.
+#[derive(Clone)]
 pub struct Partition {
     pub module_of: Vec<u32>,
     pub members: Vec<Vec<u32>>,

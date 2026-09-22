@@ -13,16 +13,21 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
     1. link peaks to genes on pb profiles: `--link-score pearson` (log1p correlation, default)
        or `abc` (Engreitz activity × contact with the 1 Mb pseudocount, ATAC only);
        `--top-k-per-gene` cuts each gene's ranked list (ATAC-only: ArchR gene activity is
-       the RNA stand-in; circular under pearson, projection-only under abc)
-    2. train peak + gene + pseudobulk embeddings jointly with **`graph-embedding-util`** FNE:
-       the link relation plus SIMBA-binned pb × feature relations for every level of the
-       pb tree (`--num-levels`, `--context-bins`) and the tree's parent edges; this is what
-       brings cellular context into the peak/gene geometry (2026-09-21)
-    3. embed cells in that space → group into clusters (min-cell gate; prefer joint RNA+ATAC or RNA-led clusters) → **refine peak→gene within each cluster** (pb-per-cluster)
+       the RNA stand-in; circular under pearson, and the gene axis of the embed either way)
+    2. train peak + gene + pseudobulk embeddings with the `graph-embedding-util` `fit/hier`
+       trainer over a Vec of feature partitions: frozen pb units for every level of the pb
+       tree, one sparse count axis and one module partition per feature kind (genes, peaks),
+       one shared unit table; a linked peak starts in its strongest gene's module, unlinked
+       peaks are k-means modules of their own; optional merge-only re-collapse from the
+       frozen unit profiles (`--merge-every`, off by default). Replaced the FNE / SIMBA
+       count-edge table (2026-09-21)
+    3. cluster the finest pb rows (min-sample gate) → **refine peak→gene within each
+       cluster** (pb-per-cluster Pearson / ABC)
     4. emit **E2G-like parquet**:
        - `peaks.parquet`: id, chromosome, start, end, class  (← enhancers)
        - `clusters.parquet`: id, name  (← cell_types)
        - `peak_gene/chr*.parquet`: id, score, target_gene_id, target_gene_name, target_gene_tss, enhancer_gene_distance, model, chromosome, enhancer_id, cell_type_id (= cluster)  (← enhancer_gene_predictions)
+       plus `{out}.{peak,gene,pb}_embedding.parquet` and `{out}.pb_tree_embedding.parquet`
 
 * [x] 2026-09-21, measured on the simulator and dropped (not in the tree):
   a bge feature-embedding affinity as the link evidence, an fne contrast with
@@ -32,6 +37,30 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   ABC-shaped targets exclude by construction. What the sim does NOT contain is a
   bystander that co-varies through shared cell state — the case Pearson is wrong
   about; a simulator knob for that is the prerequisite for any further evidence term.
+
+* [x] 2026-09-21, `data-beans-sim multiome` at `--pve-cis` 0.3 and 0.8 (cis-window 50 kb,
+  sort-dim 8, 2 levels, 32 modules per axis, 64 units/step): the hier embed takes seconds,
+  and gene–peak cosine on the trained tables ranks causal peaks well above the Pearson link
+  that seeds it (AUROC ≈ 0.85 at 10 epochs, ≈ 0.89 at 100, vs 0.64–0.70 for Pearson).
+  The link/refine stage is now the weak stage, not the embedding.
+
+* [ ] **fine-tune the links after the embed.** Today the trained gene / peak rows only
+  reach the output as side parquets; the refine re-runs the same Pearson / ABC on each
+  cluster's raw pb columns. Read the embedding in the link stage: gene–peak cosine (or a
+  unit-gated score over a cluster's pb rows) as the evidence, or folded into the Pearson
+  by product / rank average; re-measure on the sim above.
+
+* [ ] **gene–peak co-embedding term.** Genes and peaks share a space only through the
+  unit table; no loss term touches a gene and a peak directly, the cis links only seed
+  the partitions. Add a coupling term (linked-pair attraction against sampled cis
+  negatives, or a peak→gene aggregation in the gene axis) and check it does not
+  reintroduce the FNE cost regime.
+
+* [ ] **cell-level embedding (phase 2).** Units are frozen pbs, so the finest pb rows are
+  the finest sample rows; no barcode is projected onto the frozen gene / peak tables.
+  Extend `fit/mod.rs`'s per-cell projection to two feature axes (cells scored against
+  both dictionaries, one `e_cell`), write `cell_embedding.parquet`, and cluster cells
+  rather than pbs for the refine.
 
 * [ ] open question: how should we model multi-resolution Y (gene RNA/ATAC) ~ X (ATAC peaks, 1kb / 10kb / 100kb)?
 

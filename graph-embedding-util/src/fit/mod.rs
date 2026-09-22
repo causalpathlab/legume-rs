@@ -253,6 +253,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             offset_l2: config.offset_l2,
             offset_rank: config.offset_rank,
             device: config.device.clone(),
+            merge_every: 0,
+            merge_cosine: 0.95,
         },
         config.preset_features.as_ref(),
         &config.preset_offsets,

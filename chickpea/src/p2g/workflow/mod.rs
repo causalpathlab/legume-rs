@@ -1,27 +1,23 @@
 //! End-to-end peak-to-gene workflow on pb matrices.
 //!
-//! link_map → joint FNE over links + the pb levels → cluster the finest pb
+//! link_map → hierarchical embed over frozen pb units → cluster finest pb
 //! rows → within-cluster refine → E2G parquet.
 
 use crate::common::*;
 use crate::p2g::cluster::cluster_cells;
-use crate::p2g::embed_ge::{train_peak_gene_embeds, write_embedding_parquets};
+use crate::p2g::embed_ge::{train_peak_gene_embeds, write_embedding_parquets, HierEmbedConfig};
 use crate::p2g::link_map::{link_peaks_to_genes, LinkParams};
 use crate::p2g::parquet_out::{peaks_from_coords, write_e2g_tables, ClusterRow};
 use crate::p2g::pb_levels::PbLevels;
 use crate::p2g::refine::refine_within_clusters;
 use genomic_data::coordinates::{GeneTss, PeakCoord};
-use graph_embedding_util::fne::FneConfig;
 use log::info;
 
 /// Knobs for [`run_from_pseudobulk`].
 #[derive(Clone, Debug)]
 pub struct WorkflowParams {
     pub abc: LinkParams,
-    pub fne: FneConfig,
-    /// SIMBA expression levels per modality in the pb × feature relations.
-    pub context_bins: usize,
-    /// Min pb samples (or cells) to keep a cluster.
+    pub embed: HierEmbedConfig,
     pub min_cluster_samples: usize,
     pub target_clusters: Option<usize>,
 }
@@ -79,20 +75,20 @@ pub fn run_from_pseudobulk(
     info!("Link map: {} edges", edges.len());
 
     info!(
-        "Training peak/gene/pb embeddings jointly via graph-embedding-util FNE \
-         (dim={}, epochs={}, {} pb levels, {} bins)...",
-        params.fne.dim,
-        params.fne.epochs,
+        "Training peak/gene/pb embeddings via hierarchical trainer \
+         (dim={}, epochs={}, {} pb levels, units/step={})...",
+        params.embed.dim,
+        params.embed.epochs,
         levels.n_levels(),
-        params.context_bins
+        params.embed.units_per_step
     );
     let embeds = train_peak_gene_embeds(
         &edges,
         levels,
         peak_names,
         gene_names,
-        params.context_bins,
-        &params.fne,
+        rna_pb,
+        &params.embed,
     )?;
 
     write_embedding_parquets(out_dir, &embeds)?;

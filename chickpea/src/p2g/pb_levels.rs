@@ -12,8 +12,8 @@ use crate::common::Mat;
 /// Per-level pseudobulk profiles and the tree between them.
 #[derive(Clone, Debug)]
 pub struct PbLevels {
-    /// RNA per level; `None` when the input is ATAC-only (the gene activity
-    /// surrogate is not a count profile and enters no count edge).
+    /// RNA per level; `None` when the input is ATAC-only, where the gene
+    /// activity surrogate stands in for it on the embed's gene axis.
     pub rna: Option<Vec<Mat>>,
     /// ATAC per level.
     pub atac: Vec<Mat>,

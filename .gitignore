@@ -63,4 +63,10 @@ faba/smoke_out/
 
 # session scratch: experiment outputs (parquets, logs, plots, analysis scripts)
 scratch/
+tmp/
+Rplots.pdf
 target-cuda/
+
+# agent planning docs (session scratch, never tracked)
+docs/superpowers/
+docs/temp/

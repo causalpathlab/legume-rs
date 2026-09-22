@@ -7,9 +7,11 @@
 //! distance-weighted sum of cis peaks (gene body + exponential decay). Under
 //! `--link-score pearson` it is the RNA stand-in of the link too (and so
 //! correlates peaks with a sum of themselves); under `abc` the link reads
-//! only ATAC and the surrogate feeds the pb-sample projection alone.
+//! only ATAC. Either way the surrogate is the gene axis of the embed: it is
+//! non-negative, so the hierarchical softmax reads it like a count profile.
 
 use crate::common::*;
+use crate::p2g::embed_ge::HierEmbedConfig;
 use crate::p2g::gene_activity::{gene_activity_from_atac_pb, GeneActivityParams};
 use crate::p2g::input::{
     load_all_gene_coords_tsv, load_all_gene_loci_from_gff, load_atac_data, load_gene_coords_tsv,
@@ -21,7 +23,6 @@ use crate::p2g::workflow::{run_from_pseudobulk, PbMultiome, WorkflowParams};
 use data_beans::alg::collapse_data::MultilevelParams;
 use data_beans::alg::refine_multilevel::RefineParams;
 use genomic_data::coordinates::{load_gene_tss, parse_peak_coordinates, GeneTss};
-use graph_embedding_util::fne::FneConfig;
 use log::info;
 
 #[derive(Args, Debug)]
@@ -174,33 +175,64 @@ pub struct PeakToGeneArgs {
     )]
     num_levels: usize,
 
-    #[arg(
-        long,
-        default_value_t = 5,
-        help = "Expression levels per modality\n\
-                in the pb-sample × feature relations of the embedding"
-    )]
-    context_bins: usize,
-
     /* Embedding / cluster */
     #[arg(
         long,
         default_value_t = 32,
-        help = "FNE embedding dimension for peak/gene nodes"
+        help = "Embedding dimension H for hierarchical trainer"
     )]
     embedding_dim: usize,
 
-    #[arg(long, default_value_t = 10, help = "FNE training epochs")]
+    #[arg(long, default_value_t = 10, help = "Hierarchical training epochs")]
     epochs: usize,
 
-    #[arg(long, default_value_t = 42, help = "RNG seed for FNE")]
+    #[arg(long, default_value_t = 42, help = "RNG seed for embed + module init")]
     seed: u64,
+
+    #[arg(long, default_value_t = 128, help = "Gene module count M for axis 0")]
+    gene_modules: usize,
+
+    #[arg(
+        long,
+        default_value_t = 128,
+        help = "Modules for peaks with no cis link;\n\
+                a linked peak starts in its strongest gene's module"
+    )]
+    peak_modules: usize,
+
+    #[arg(
+        long,
+        default_value_t = 256,
+        help = "Pb units per hier gradient step (bge-style batch)"
+    )]
+    units_per_step: usize,
+
+    #[arg(
+        long,
+        default_value_t = 8,
+        help = "Modules sampled per unit per partition (K)"
+    )]
+    modules_per_unit: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Re-collapse modules every N epochs from pb profiles; 0=off"
+    )]
+    merge_every: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.95,
+        help = "Cosine threshold for merge-only pb-profile re-collapse"
+    )]
+    merge_cosine: f32,
 
     #[arg(
         long,
         value_enum,
         default_value_t = ComputeDevice::Cpu,
-        help = "Compute device for the FNE training"
+        help = "Compute device for hierarchical embed training"
     )]
     device: ComputeDevice,
 
@@ -227,7 +259,7 @@ pub struct PeakToGeneArgs {
         required = true,
         help = "Output prefix: E2G tables under `{out}/`;\n\
                 `{out}.peak_embedding.parquet`, `.gene_embedding.parquet`,\n\
-                `.cell_embedding.parquet` (finest pseudobulks);\n\
+                `.pb_embedding.parquet` (finest pseudobulks);\n\
                 `.pb_tree_embedding.parquet` with more than one level"
     )]
     out: Box<str>,
@@ -412,14 +444,19 @@ fn finish_workflow(args: &PeakToGeneArgs, pb: PbMultiome<'_>) -> anyhow::Result<
             contact_min_distance: args.contact_min_distance,
             contact_pseudocount_distance: args.contact_pseudocount_distance,
         },
-        fne: FneConfig {
+        embed: HierEmbedConfig {
             dim: args.embedding_dim,
             epochs: args.epochs,
             seed: args.seed,
             device: args.device.to_device(args.device_no)?,
-            ..FneConfig::default()
+            n_gene_modules: args.gene_modules,
+            n_peak_modules: args.peak_modules,
+            units_per_step: args.units_per_step,
+            modules_per_unit: args.modules_per_unit,
+            merge_every: args.merge_every,
+            merge_cosine: args.merge_cosine,
+            ..HierEmbedConfig::default()
         },
-        context_bins: args.context_bins,
         min_cluster_samples: args.min_cluster_samples,
         target_clusters: args.num_clusters,
     };

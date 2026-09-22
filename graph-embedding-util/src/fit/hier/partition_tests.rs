@@ -27,7 +27,7 @@ fn two_homogeneous_partitions_over_genes_and_peaks() {
     // Module indices are per-partition (not a shared bipartite id).
     let genes = Partition::from_labels(&[0, 0, 1], 2);
     let peaks = Partition::from_labels(&[1, 0], 2);
-    let partitions = vec![genes, peaks];
+    let partitions = [genes, peaks];
     assert_eq!(partitions.len(), 2);
     assert_eq!(partitions[0].module_of, vec![0, 0, 1]);
     assert_eq!(partitions[0].members[0], vec![0, 1]);

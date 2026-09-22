@@ -59,7 +59,7 @@ use super::params::{ExtraAxisParams, HierParams};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::units::UnitTable;
 use legume_numeric::candle::candle_core::backprop::GradStore;
-use legume_numeric::candle::candle_core::{DType, Result as CResult, Tensor, Var, D};
+use legume_numeric::candle::candle_core::{DType, Device, Result as CResult, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
 use legume_numeric::candle::convert::{add_into, to_1d};
 use legume_numeric::candle::fast_index::gather_rows;
@@ -544,6 +544,24 @@ pub struct Optimizers {
 }
 
 impl Optimizers {
+    pub fn reset_base_mu(&mut self, n_m: usize, lr: f32, dev: &Device) -> CResult<()> {
+        self.mu = RowAdagrad::new(n_m, f64::from(lr), dev)?;
+        Ok(())
+    }
+
+    pub fn reset_offset_mu(&mut self, n_m: usize, lr: f32, dev: &Device) -> CResult<()> {
+        let lr = f64::from(lr);
+        for (opt_mu, _, _) in &mut self.offsets {
+            *opt_mu = RowAdagrad::new(n_m, lr, dev)?;
+        }
+        Ok(())
+    }
+
+    pub fn reset_extra_mu(&mut self, idx: usize, n_m: usize, lr: f32, dev: &Device) -> CResult<()> {
+        self.extra[idx].0 = RowAdagrad::new(n_m, f64::from(lr), dev)?;
+        Ok(())
+    }
+
     pub fn new(params: &HierParams, lr: f32) -> CResult<Self> {
         let dev = &params.dev;
         let lr = f64::from(lr);

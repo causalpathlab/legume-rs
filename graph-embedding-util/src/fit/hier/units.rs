@@ -171,8 +171,8 @@ impl UnitTable {
     /// subsample — callers that freeze pb samples after multilevel collapse
     /// pass only those pb rows. Axis 0 uses [`TrackSpec::base`]; further axes
     /// are plain sparse count axes (not TrackSpec tracks of genes).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn from_pseudobulk_axes(
+    /// Frozen multi-axis units from one pb triplet blob list per feature axis.
+    pub fn from_pseudobulk_axes(
         axis_blobs: &[&[&[Triplet]]],
         n_pb_per_level: &[usize],
         n_features: &[usize],

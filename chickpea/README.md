@@ -20,24 +20,23 @@
      power-law contact with its pseudocount. Reads ATAC only.
    Per gene the edges are ranked and cut to `--top-k-per-gene` (off by default)
    and `--max-cis`.
-3. **Embed** peaks, genes and every level's pseudobulks in one
-   graph-embedding-util FNE table: the link relation (weight = score), one
-   pseudobulk × gene / pseudobulk × peak relation per SIMBA expression level
-   (`--context-bins`, library-normalized `log1p` profiles binned by 1-D
-   k-means) and the child → parent edges of the levels. Peaks and genes are
-   thus placed by both their cis links and the cellular contexts that express
-   them. The finest pseudobulk rows are Leiden-clustered.
+3. **Embed** peaks, genes, and every level's pseudobulks with a bge-style
+   hierarchical trainer (`graph-embedding-util` `fit/hier`): frozen pb units,
+   separate gene and peak module partitions, sparse count axes, not FNE /
+   SIMBA count edges. A linked peak starts in its strongest gene's module;
+   unlinked peaks are clustered on their own. Finest pseudobulk rows are
+   Leiden-clustered.
 4. **Recompute the link within each cluster** (same score on the cluster's
    pseudobulk columns): one link table per `cell_type_id`.
 5. **Write** E2G-like `{out}/peaks.parquet`, `clusters.parquet`,
-   `peak_gene/chr*.parquet`, plus `{out}.{peak,gene,cell}_embedding.parquet`
-   (`cell` = finest pseudobulks) and, with more than one level,
-   `{out}.pb_tree_embedding.parquet` (rows `L{level}:{i}`).
+   `peak_gene/chr*.parquet`, plus `{out}.{peak,gene,pb}_embedding.parquet`
+   (`pb` = finest pseudobulks; there is no per-cell projection yet) and, with
+   more than one level, `{out}.pb_tree_embedding.parquet` (rows `L{level}:{i}`).
 
 ATAC-only (omit `--rna-files`): an ArchR-style gene activity stands in for RNA.
 Under `pearson` that makes the link a correlation of peaks with a weighted sum
-of themselves, so prefer `--link-score abc` there. The surrogate enters no
-count relation; the embedding reads ATAC only.
+of themselves, so prefer `--link-score abc` there. The surrogate is also the
+gene axis of the embed (it is non-negative, so it reads like a count profile).
 
 ```bash
 chickpea peak-to-gene \
@@ -49,8 +48,8 @@ chickpea peak-to-gene \
   -o out
 ```
 
-The FNE is the costly stage (one edge per nonzero pseudobulk entry);
-`--device cuda` needs a build with `--features cuda`.
+The embed stage scales with **pb units** per epoch (`⌈U / units-per-step⌉`
+steps), not ATAC nnz; `--device cuda` needs a build with `--features cuda`.
 
 Tests live under `tests/` (`cargo test -p chickpea`).
 

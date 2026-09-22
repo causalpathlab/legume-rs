@@ -2,6 +2,7 @@
 //! per unit ∝ its share, one [`step`] per chunk of units; the composed
 //! dictionary at the end.
 
+use super::module_recollapse::{merge_module_rows, recollapse_modules};
 use super::params::{HierParams, PresetGenes, PresetMode, PresetOffsets};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::step::{apply, step_loss, step_loss_extra, Optimizers, StepCtx, StepPlan, StepStats};
@@ -22,6 +23,95 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const REPORT_EVERY: usize = 50;
 
+/// One feature axis's partition and everything derived from it: the units'
+/// view through the partition, each track's support, and the module pickers.
+/// Rebuilt as a whole when the partition re-collapses.
+struct AxisState {
+    axis: usize,
+    part: Partition,
+    tracks: TrackSpec,
+    um: UnitModules,
+    sup: TrackSupport,
+    pickers: Vec<Option<WeightedIndex<f64>>>,
+}
+
+impl AxisState {
+    /// Axis 0 carries the unit table's [`TrackSpec`]; every other axis is a
+    /// single unrestricted track over its own feature ids.
+    fn new(units: &UnitTable, axis: usize, part: Partition) -> Self {
+        let tracks = if axis == 0 {
+            units.tracks.clone()
+        } else {
+            TrackSpec::base(units.axes[axis].n_features)
+        };
+        let um = UnitModules::from_axis(units, axis, &part);
+        let sup = TrackSupport::new(&tracks, &part);
+        let pickers = module_pickers(&um, part.n_modules());
+        Self {
+            axis,
+            part,
+            tracks,
+            um,
+            sup,
+            pickers,
+        }
+    }
+
+    fn n_modules(&self) -> usize {
+        self.part.n_modules()
+    }
+
+    fn ctx<'a>(&'a self, units: &'a UnitTable) -> StepCtx<'a> {
+        StepCtx {
+            units,
+            um: &self.um,
+            part: &self.part,
+            sup: &self.sup,
+            axis: self.axis,
+        }
+    }
+
+    /// Merge-only re-collapse from the frozen unit profiles: the partition,
+    /// its derived views, this axis's `μ` / bias rows and their optimizer
+    /// state all move together. A no-op when nothing merges.
+    fn recollapse(
+        &mut self,
+        cfg: &HierConfig,
+        units: &UnitTable,
+        params: &mut HierParams,
+        opt: &mut Optimizers,
+    ) -> anyhow::Result<()> {
+        let axis = self.axis;
+        let Some((new_part, map)) = recollapse_modules(units, axis, &self.part, cfg.merge_cosine)
+        else {
+            return Ok(());
+        };
+        let from_m = self.n_modules();
+        if axis == 0 {
+            merge_module_rows(&mut params.mu, &mut params.b_m, &map, &params.dev)?;
+            for o in params.offsets.iter_mut() {
+                merge_module_rows(&mut o.d_mu, &mut o.d_b_m, &map, &params.dev)?;
+            }
+            opt.reset_base_mu(map.n_modules, cfg.lr, &params.dev)?;
+            opt.reset_offset_mu(map.n_modules, cfg.lr, &params.dev)?;
+        } else {
+            let extra = &mut params.extra[axis - 1];
+            merge_module_rows(&mut extra.mu, &mut extra.b_m, &map, &params.dev)?;
+            opt.reset_extra_mu(axis - 1, map.n_modules, cfg.lr, &params.dev)?;
+        }
+        self.part = new_part;
+        self.um = UnitModules::from_axis(units, axis, &self.part);
+        self.sup = TrackSupport::new(&self.tracks, &self.part);
+        self.pickers = module_pickers(&self.um, self.n_modules());
+        info!(
+            "Phase 1 (hier): axis {axis} unit-profile re-collapse, M {from_m} → {}",
+            self.n_modules()
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
 pub struct HierConfig {
     pub n_modules: usize,
     pub epochs: usize,
@@ -43,6 +133,10 @@ pub struct HierConfig {
     pub offset_rank: usize,
     /// Where the tables live and the steps run.
     pub device: Device,
+    /// Re-collapse modules every this many epochs; `0` disables.
+    pub merge_every: usize,
+    /// Cosine threshold on frozen pb feature profiles (whole-module merge-only).
+    pub merge_cosine: f32,
 }
 
 /// Per feature partition: composed feature rows, biases, and module table.
@@ -165,18 +259,22 @@ pub fn train(
     if units.n_tracks() > 1 {
         crate::fit::config::validate_offset_rank(cfg.offset_rank, h)?;
     }
-    let part = Partition::from_labels(labels, cfg.n_modules);
-    let um = UnitModules::new(units, &part);
-    // Each track's support through the partition: built once here, never per
-    // step. Inert on a one-track axis, where the base track covers every gene.
-    let sup = TrackSupport::new(&units.tracks, &part);
-    let (n_u, n_m, d) = (units.n_units(), part.n_modules(), units.tracks.n_genes());
+    // A preset pins `μ` (or hangs a residual on it); a merge rewrites `μ`.
+    anyhow::ensure!(
+        cfg.merge_every == 0 || (preset.is_none() && preset_offsets.is_empty()),
+        "module re-collapse (merge_every > 0) cannot be combined with preset rows or offsets"
+    );
+    // The partition and each track's support through it: built once here,
+    // never per step (only a re-collapse rebuilds them). The support is inert
+    // on a one-track axis, where the base track covers every gene.
+    let mut ax = AxisState::new(units, 0, Partition::from_labels(labels, cfg.n_modules));
+    let (n_u, n_m, d) = (units.n_units(), ax.n_modules(), units.tracks.n_genes());
     let n_t = units.n_tracks();
     let n_features = units.n_features();
     let mut params =
         HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.offset_rank, cfg.seed, &cfg.device)?;
     if let Some(f) = preset {
-        params.preset(f, &part.module_of)?;
+        params.preset(f, &ax.part.module_of)?;
         info!(
             "Phase 1 (hier) — {} of {d} gene rows {}{}",
             f.ids.len(),
@@ -211,15 +309,7 @@ pub fn train(
         );
     }
     let mut opt = Optimizers::new(&params, cfg.lr)?;
-    let ctx = StepCtx {
-        units,
-        um: &um,
-        part: &part,
-        sup: &sup,
-        axis: 0,
-    };
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
-    let pickers = module_pickers(&um, n_m);
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
     let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
@@ -245,9 +335,21 @@ pub fn train(
                 info!("Phase 1 (hier) — stop requested at epoch {epoch}");
                 break 'epochs;
             }
-            let plan = draw_plan(chunk, &pickers, n_m, n_t, cfg.modules_per_unit, &mut rng);
-            let (stats, loss): (StepStats, _) =
-                step_loss(&params, &ctx, &plan, offset_l2_step, lora_ridge_step)?;
+            let plan = draw_plan(
+                chunk,
+                &ax.pickers,
+                ax.n_modules(),
+                n_t,
+                cfg.modules_per_unit,
+                &mut rng,
+            );
+            let (stats, loss): (StepStats, _) = step_loss(
+                &params,
+                &ax.ctx(units),
+                &plan,
+                offset_l2_step,
+                lora_ridge_step,
+            )?;
             let grads = loss.backward()?;
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;
@@ -258,6 +360,9 @@ pub fn train(
         let per_unit = 1.0 / n_units_seen.max(1) as f64;
         last_per_unit = (acc.loss_module + acc.loss_gene + acc.loss_ridge) * per_unit;
         bar.inc(1);
+        if cfg.merge_every > 0 && (epoch + 1).is_multiple_of(cfg.merge_every) {
+            ax.recollapse(cfg, units, &mut params, &mut opt)?;
+        }
         if (epoch + 1).is_multiple_of(REPORT_EVERY) || epoch + 1 == cfg.epochs {
             let ms = t0.elapsed().as_secs_f64() * 1e3 / ((epoch + 1) * steps_per_epoch) as f64;
             info!(
@@ -279,7 +384,7 @@ pub fn train(
     let (rho, b_feat) = params.compose(
         &units.tracks.track_of_row,
         &units.tracks.gene_of_row,
-        &part.module_of,
+        &ax.part.module_of,
     )?;
     let e_u_host = to_host(params.e_u.as_tensor())?;
     let e_u = DMatrix::<f32>::from_row_slice(n_u, h, &e_u_host);
@@ -326,14 +431,16 @@ pub fn train_partitions(
         );
     }
     if partitions.len() == 1 {
+        // The given partition's module count wins over `cfg.n_modules`.
+        let cfg = HierConfig {
+            n_modules: partitions[0].n_modules(),
+            ..cfg.clone()
+        };
         return train(
             units,
             &partitions[0].module_of,
             h,
-            &HierConfig {
-                n_modules: partitions[0].n_modules(),
-                ..cfg.clone_with_modules(partitions[0].n_modules())
-            },
+            &cfg,
             preset,
             preset_offsets,
             stop,
@@ -352,30 +459,13 @@ pub fn train_partitions(
 
     let n_u = units.n_units();
     let n_t0 = units.n_tracks();
-    let part0 = &partitions[0];
-    let n_m0 = part0.n_modules();
+    let n_m0 = partitions[0].n_modules();
     let d0 = units.tracks.n_genes();
 
-    let ums: Vec<UnitModules> = partitions
+    let mut axis_states: Vec<AxisState> = partitions
         .iter()
         .enumerate()
-        .map(|(a, p)| UnitModules::from_axis(units, a, p))
-        .collect();
-    let track_specs: Vec<TrackSpec> = partitions
-        .iter()
-        .enumerate()
-        .map(|(a, _)| {
-            if a == 0 {
-                units.tracks.clone()
-            } else {
-                TrackSpec::base(units.axes[a].n_features)
-            }
-        })
-        .collect();
-    let supports: Vec<TrackSupport> = partitions
-        .iter()
-        .zip(&track_specs)
-        .map(|(p, ts)| TrackSupport::new(ts, p))
+        .map(|(a, p)| AxisState::new(units, a, p.clone()))
         .collect();
 
     let mut params = HierParams::new_tracked(
@@ -398,18 +488,14 @@ pub fn train_partitions(
     }
 
     let mut opt = Optimizers::new(&params, cfg.lr)?;
-    let pickers: Vec<Vec<Option<WeightedIndex<f64>>>> = ums
-        .iter()
-        .map(|um| module_pickers(um, um.n_modules))
-        .collect();
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
     let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
 
-    let m_list: Vec<String> = partitions
+    let m_list: Vec<String> = axis_states
         .iter()
-        .map(|p| p.n_modules().to_string())
+        .map(|ax| ax.n_modules().to_string())
         .collect();
     let f_list: Vec<String> = units
         .axes
@@ -440,17 +526,16 @@ pub fn train_partitions(
                 break 'epochs;
             }
             let mut loss_total = None;
-            for a in 0..partitions.len() {
-                let n_m = partitions[a].n_modules();
-                let n_t = ums[a].n_tracks;
-                let plan = draw_plan(chunk, &pickers[a], n_m, n_t, cfg.modules_per_unit, &mut rng);
-                let ctx = StepCtx {
-                    units,
-                    um: &ums[a],
-                    part: &partitions[a],
-                    sup: &supports[a],
-                    axis: a,
-                };
+            for (a, ax) in axis_states.iter().enumerate() {
+                let plan = draw_plan(
+                    chunk,
+                    &ax.pickers,
+                    ax.n_modules(),
+                    ax.um.n_tracks,
+                    cfg.modules_per_unit,
+                    &mut rng,
+                );
+                let ctx = ax.ctx(units);
                 let (stats, loss) = if a == 0 {
                     step_loss(&params, &ctx, &plan, offset_l2_step, 0.0)?
                 } else {
@@ -469,6 +554,11 @@ pub fn train_partitions(
         let per_unit = 1.0 / n_units_seen.max(1) as f64;
         last_per_unit = (acc.loss_module + acc.loss_gene + acc.loss_ridge) * per_unit;
         bar.inc(1);
+        if cfg.merge_every > 0 && (epoch + 1).is_multiple_of(cfg.merge_every) {
+            for ax in &mut axis_states {
+                ax.recollapse(cfg, units, &mut params, &mut opt)?;
+            }
+        }
         if (epoch + 1).is_multiple_of(REPORT_EVERY) || epoch + 1 == cfg.epochs {
             let ms = t0.elapsed().as_secs_f64() * 1e3 / ((epoch + 1) * steps_per_epoch) as f64;
             info!(
@@ -489,7 +579,7 @@ pub fn train_partitions(
     let (rho0, b0) = params.compose(
         &units.tracks.track_of_row,
         &units.tracks.gene_of_row,
-        &partitions[0].module_of,
+        &axis_states[0].part.module_of,
     )?;
     let mut axes = vec![HierAxisOut {
         rho: rho0.clone(),
@@ -497,7 +587,7 @@ pub fn train_partitions(
         mu: params.mu_host()?,
     }];
     for (i, ax) in params.extra.iter().enumerate() {
-        let (rho, b_feat) = ax.compose(&partitions[i + 1].module_of)?;
+        let (rho, b_feat) = ax.compose(&axis_states[i + 1].part.module_of)?;
         axes.push(HierAxisOut {
             rho,
             b_feat,
@@ -514,23 +604,6 @@ pub fn train_partitions(
         final_loss_per_unit: last_per_unit,
         steps_per_epoch,
     })
-}
-
-impl HierConfig {
-    fn clone_with_modules(&self, n_modules: usize) -> Self {
-        Self {
-            n_modules,
-            epochs: self.epochs,
-            units_per_step: self.units_per_step,
-            modules_per_unit: self.modules_per_unit,
-            lr: self.lr,
-            weight_decay: self.weight_decay,
-            seed: self.seed,
-            offset_l2: self.offset_l2,
-            offset_rank: self.offset_rank,
-            device: self.device.clone(),
-        }
-    }
 }
 
 #[cfg(test)]

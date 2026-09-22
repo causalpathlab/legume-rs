@@ -53,6 +53,8 @@ fn one_epoch_two_partitions_finite_rows_and_steps_per_epoch() {
         offset_l2: 0.0,
         offset_rank: 1,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let out = train_partitions(&units, &partitions, 4, &cfg, None, &[], &stop).unwrap();
@@ -105,6 +107,8 @@ fn planted_programs_separate_units_and_genes() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
@@ -141,6 +145,8 @@ fn the_stop_flag_ends_training_early_with_finite_output() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(true);
     let out = train(&units, &[0, 0], 2, &cfg, None, &[], &stop).unwrap();
@@ -209,6 +215,8 @@ fn single_track_output_is_identical_through_both_constructors() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let labels = vec![0u32, 0, 1, 1];
     let stop = AtomicBool::new(false);
@@ -297,6 +305,8 @@ fn planted_two_track_programs() {
         offset_l2: 0.01,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
@@ -387,6 +397,8 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
@@ -448,6 +460,8 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
@@ -475,6 +489,8 @@ fn frozen_genes_must_be_in_range_and_match_h() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let bad_gene = PresetGenes {
@@ -516,6 +532,8 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let start = train(&units, &labels, h, &cfg0, Some(&preset), &[], &stop).unwrap();
     for g in 0..20 {
@@ -561,6 +579,8 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let lora = preset(PresetMode::Lora(LoraSpec {
@@ -616,6 +636,8 @@ fn the_offset_rank_is_checked_against_h_on_a_tracked_axis() {
         offset_l2: 0.01,
         offset_rank: rank,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     for rank in [0usize, 5] {
@@ -672,6 +694,8 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
         offset_l2: 0.01,
         offset_rank: 2,
         device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &offsets, &stop).unwrap();
@@ -717,4 +741,109 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
         }),
         "under lora the given offset moves on from δ₀"
     );
+}
+
+fn merge_cfg(merge_every: usize, merge_cosine: f32, n_modules: usize) -> HierConfig {
+    HierConfig {
+        n_modules,
+        epochs: 4,
+        units_per_step: 4,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 3,
+        offset_l2: 0.0,
+        offset_rank: 1,
+        device: Device::Cpu,
+        merge_every,
+        merge_cosine,
+    }
+}
+
+/// 8 units, 6 features in two planted profiles (0..3 and 3..6).
+fn two_profile_axis(scale: f32) -> Vec<Triplet> {
+    let mut v = Vec::new();
+    for u in 0..8u32 {
+        for f in 0..6u32 {
+            let c = if (u < 4) == (f < 3) {
+                scale * (10.0 + (u % 2) as f32)
+            } else {
+                scale
+            };
+            v.push(t(u, f, c));
+        }
+    }
+    v
+}
+
+/// One partition through `train_partitions` keeps ITS module count; the
+/// config's `n_modules` is not consulted when a partition is given.
+#[test]
+fn a_single_given_partition_keeps_its_own_module_count() {
+    let units = UnitTable::from_pseudobulk_axes(&[&[&two_profile_axis(1.0)]], &[8], &[6]);
+    let part = Partition::from_labels(&[0, 0, 1, 2, 2, 3], 4);
+    let stop = AtomicBool::new(false);
+    let out =
+        train_partitions(&units, &[part], 4, &merge_cfg(0, 0.95, 2), None, &[], &stop).unwrap();
+    assert_eq!(out.axes[0].mu.nrows(), 4);
+}
+
+/// Re-collapse rewrites `μ`, which a preset pins or decorates with a residual,
+/// so the two are refused together rather than silently combined.
+#[test]
+fn merge_is_refused_with_a_preset() {
+    let (units, labels) = planted_units();
+    let frozen = PresetGenes {
+        ids: vec![0],
+        rows: vec![0.0; 4],
+        mode: PresetMode::Freeze,
+    };
+    let stop = AtomicBool::new(false);
+    let err = match train(
+        &units,
+        &labels,
+        4,
+        &merge_cfg(1, 0.95, 2),
+        Some(&frozen),
+        &[],
+        &stop,
+    ) {
+        Ok(_) => panic!("a preset with merge_every > 0 was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("merge"), "{err}");
+}
+
+/// With merging on, a partition whose modules split one planted profile
+/// coarsens during training and the fit still finishes finite; the
+/// single-partition and the multi-partition paths both do it.
+#[test]
+fn merging_during_training_coarsens_every_axis() {
+    let a0 = two_profile_axis(1.0);
+    let a1 = two_profile_axis(2.0);
+    let stop = AtomicBool::new(false);
+
+    let one = UnitTable::from_pseudobulk_axes(&[&[&a0]], &[8], &[6]);
+    let p0 = Partition::from_labels(&[0, 0, 1, 2, 2, 3], 4);
+    let out = train_partitions(
+        &one,
+        std::slice::from_ref(&p0),
+        4,
+        &merge_cfg(1, 0.9, 4),
+        None,
+        &[],
+        &stop,
+    )
+    .unwrap();
+    assert_eq!(out.axes[0].mu.nrows(), 2, "single partition: 4 modules → 2");
+    assert!(out.rho.iter().all(|v| v.is_finite()));
+
+    let two = UnitTable::from_pseudobulk_axes(&[&[&a0], &[&a1]], &[8], &[6, 6]);
+    let p1 = Partition::from_labels(&[0, 1, 2, 3, 3, 3], 4);
+    let out =
+        train_partitions(&two, &[p0, p1], 4, &merge_cfg(1, 0.9, 4), None, &[], &stop).unwrap();
+    assert_eq!(out.axes[0].mu.nrows(), 2, "axis 0: 4 modules → 2");
+    assert_eq!(out.axes[1].mu.nrows(), 2, "axis 1: 4 modules → 2");
+    assert!(out.axes[1].rho.iter().all(|v| v.is_finite()));
+    assert!(out.e_u.iter().all(|v| v.is_finite()));
 }

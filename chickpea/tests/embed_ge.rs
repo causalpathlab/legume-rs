@@ -1,4 +1,4 @@
-//! Joint FNE over the link relation and the pb-tree count relations.
+//! Joint hierarchical embed over frozen pb units.
 
 mod common;
 
@@ -6,28 +6,26 @@ use chickpea::p2g::embed_ge::*;
 use chickpea::p2g::link_map::PeakGeneEdge;
 use chickpea::p2g::pb_levels::PbLevels;
 use common::mat;
-use graph_embedding_util::fne::FneConfig;
 use legume_numeric::candle::candle_core::Device;
 use legume_numeric::matrix::dense_mat_io::axis_id_names as names;
 use legume_numeric::matrix::utils::cosine;
 
-fn cfg(seed: u64, epochs: usize) -> FneConfig {
-    FneConfig {
+fn cfg(seed: u64, epochs: usize) -> HierEmbedConfig {
+    HierEmbedConfig {
         dim: 8,
         epochs,
-        batch_size: 16,
-        num_batch_negs: 4,
-        num_uniform_negs: 4,
-        wd: Some(0.0),
-        eval_fraction: 0.0,
         seed,
         device: Device::Cpu,
-        ..FneConfig::default()
+        n_gene_modules: 4,
+        n_peak_modules: 4,
+        units_per_step: 8,
+        modules_per_unit: 2,
+        lr: 0.1,
+        merge_every: 0,
+        merge_cosine: 0.95,
     }
 }
 
-/// Two groups of finest pbs (8 + 8) under two coarse parents; group A
-/// expresses genes 0-1 and peaks 0-2, group B genes 2-3 and peaks 3-5.
 fn two_group_tree() -> PbLevels {
     let group = |s: usize| usize::from(s >= 8);
     let rna0 = mat(4, 16, |g, s| {
@@ -65,15 +63,17 @@ fn two_group_links() -> Vec<PeakGeneEdge> {
 }
 
 #[test]
-fn fne_returns_finite_rows_for_peaks_genes_and_every_level() {
+fn hier_returns_finite_rows_and_unit_scaled_steps() {
     let tree = two_group_tree();
+    let rna = tree.rna.as_ref().unwrap()[0].clone();
+    let c = cfg(7, 2);
     let out = train_peak_gene_embeds(
         &two_group_links(),
         &tree,
         &names("chr1:", 6),
         &names("G", 4),
-        5,
-        &cfg(7, 2),
+        &rna,
+        &c,
     )
     .unwrap();
     assert_eq!(out.dim, 8);
@@ -81,7 +81,8 @@ fn fne_returns_finite_rows_for_peaks_genes_and_every_level() {
     assert_eq!(out.gene.len(), 4);
     assert_eq!(out.pb.len(), 2);
     assert_eq!(out.pb[0].len(), 16);
-    assert_eq!(out.pb[1].len(), 2);
+    let n_u: usize = 16 + 2;
+    assert_eq!(out.steps_per_epoch, n_u.div_ceil(c.units_per_step));
     assert!(
         out.peak
             .iter()
@@ -96,12 +97,13 @@ fn fne_returns_finite_rows_for_peaks_genes_and_every_level() {
 #[test]
 fn pb_rows_separate_by_program_and_parents_sit_with_their_children() {
     let tree = two_group_tree();
+    let rna = tree.rna.as_ref().unwrap()[0].clone();
     let out = train_peak_gene_embeds(
         &two_group_links(),
         &tree,
         &names("chr1:", 6),
         &names("G", 4),
-        5,
+        &rna,
         &cfg(11, 30),
     )
     .unwrap();
@@ -116,7 +118,6 @@ fn pb_rows_separate_by_program_and_parents_sit_with_their_children() {
         m
     };
     let (ca, cb) = (mean(0..8), mean(8..16));
-    // Every finest pb is nearer its own group's centroid.
     for (i, row) in pb.iter().enumerate() {
         let (own, other) = if i < 8 { (&ca, &cb) } else { (&cb, &ca) };
         assert!(
@@ -124,16 +125,22 @@ fn pb_rows_separate_by_program_and_parents_sit_with_their_children() {
             "pb {i} closer to the other group"
         );
     }
-    // Each parent is nearer its own children than the other parent's.
     let (pa, pb1) = (&out.pb[1][0], &out.pb[1][1]);
     assert!(cosine(pa, &ca) > cosine(pa, &cb));
     assert!(cosine(pb1, &cb) > cosine(pb1, &ca));
-    // Each gene is nearer the pbs that express it.
+    // Each gene and each peak sits nearer the pbs that express it.
     for g in 0..4 {
         let (own, other) = if g < 2 { (&ca, &cb) } else { (&cb, &ca) };
         assert!(
             cosine(&out.gene[g], own) > cosine(&out.gene[g], other),
             "gene {g} closer to the other group"
+        );
+    }
+    for p in 0..6 {
+        let (own, other) = if p < 3 { (&ca, &cb) } else { (&cb, &ca) };
+        assert!(
+            cosine(&out.peak[p], own) > cosine(&out.peak[p], other),
+            "peak {p} closer to the other group"
         );
     }
 }

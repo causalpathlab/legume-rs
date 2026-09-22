@@ -47,7 +47,7 @@ fn print_logo() {
                   clusters.parquet (id, name),\n\
                   peak_gene/chr*.parquet (score, gene fields, enhancer_id, cell_type_id, …).\n\
                   Also `{out}.peak_embedding.parquet`, `{out}.gene_embedding.parquet`,\n\
-                  and `{out}.cell_embedding.parquet`.",
+                  and `{out}.pb_embedding.parquet` (finest pseudobulks; no per-cell projection).",
     term_width = 80
 )]
 struct Cli {
@@ -73,10 +73,10 @@ enum Commands {
                       1. Load paired RNA+ATAC; optional RNA-driven cell QC.\n\
                       2. data-beans multilevel pb collapse (+ refine; optional --use-adjusted).\n\
                       3. Score cis peak-gene links (--link-score pearson | abc);\n\
-                         train peak/gene embeds with ge-util FNE.\n\
+                         train peak/gene embeds with ge-util hier.\n\
                       4. Embed pb samples → Leiden clusters → within-cluster refine.\n\
                       5. Write `{out}.peak_embedding.parquet`, `{out}.gene_embedding.parquet`,\n\
-                         `{out}.cell_embedding.parquet`, and E2G-like tables\n\
+                         `{out}.pb_embedding.parquet` (finest pbs), and E2G-like tables\n\
                          (`{out}/peaks`, clusters, peak_gene/chr*).\n\
                       \n\
                       See chickpea/todo.md.",
