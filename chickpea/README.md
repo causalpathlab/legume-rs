@@ -24,19 +24,26 @@
    hierarchical trainer (`graph-embedding-util` `fit/hier`): frozen pb units,
    separate gene and peak module partitions, sparse count axes, not FNE /
    SIMBA count edges. A linked peak starts in its strongest gene's module;
-   unlinked peaks are clustered on their own. Finest pseudobulk rows are
-   Leiden-clustered.
-4. **Recompute the link within each cluster** (same score on the cluster's
-   pseudobulk columns): one link table per `cell_type_id`.
+   unlinked peaks are clustered on their own. Then every cell is projected
+   onto the frozen gene and peak dictionaries (one Poisson partition and one
+   intercept per axis, one shared latent), streamed from the backends in
+   groups so nothing dense over cells and features is built;
+   `--no-cell-embedding` skips this and clusters the finest pseudobulks instead.
+4. **Cluster the cells** (Leiden on the L2-normalised rows), label each finest
+   pseudobulk by the majority of its cells, and **recompute the link within
+   each cluster** (same score on the cluster's pseudobulk columns): one link
+   table per `cell_type_id`.
 5. **Write** E2G-like `{out}/peaks.parquet`, `clusters.parquet`,
-   `peak_gene/chr*.parquet`, plus `{out}.{peak,gene,pb}_embedding.parquet`
-   (`pb` = finest pseudobulks; there is no per-cell projection yet) and, with
+   `peak_gene/chr*.parquet`, plus `{out}.{peak,gene,pb,cell}_embedding.parquet`
+   (`pb` = finest pseudobulks, `cell` = one row per barcode) and, with
    more than one level, `{out}.pb_tree_embedding.parquet` (rows `L{level}:{i}`).
 
 ATAC-only (omit `--rna-files`): an ArchR-style gene activity stands in for RNA.
 Under `pearson` that makes the link a correlation of peaks with a weighted sum
 of themselves, so prefer `--link-score abc` there. The surrogate is also the
-gene axis of the embed (it is non-negative, so it reads like a count profile).
+gene axis of the embed (it is non-negative, so it reads like a count profile);
+cells are projected on the peak axis alone, since the surrogate has no
+per-cell counts.
 
 ```bash
 chickpea peak-to-gene \

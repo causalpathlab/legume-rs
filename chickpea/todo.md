@@ -56,11 +56,17 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   negatives, or a peak→gene aggregation in the gene axis) and check it does not
   reintroduce the FNE cost regime.
 
-* [ ] **cell-level embedding (phase 2).** Units are frozen pbs, so the finest pb rows are
-  the finest sample rows; no barcode is projected onto the frozen gene / peak tables.
-  Extend `fit/mod.rs`'s per-cell projection to two feature axes (cells scored against
-  both dictionaries, one `e_cell`), write `cell_embedding.parquet`, and cluster cells
-  rather than pbs for the refine.
+* [x] **cell-level embedding (phase 2)** (2026-09-21). A per-axis cold Poisson-MAP
+  engine in `graph-embedding-util` (`fit/projection/block_sgd/axes.rs`): one partition
+  and one intercept per feature axis, one shared latent, streamed from the per-modality
+  backends in groups. chickpea projects every cell onto the frozen gene and peak
+  dictionaries, writes `{out}.cell_embedding.parquet`, clusters cells, and labels each
+  finest pb by the majority of its cells for the refine. ATAC-only projects on the peak
+  axis alone. `--no-cell-embedding` keeps the pb-only path. `tracks.rs` / `polish_cells`
+  untouched (senna follow-up: encoder-only vs solve-only, then route bge onto this engine).
+
+* [ ] batch fold in phase 2 once the collapse exposes a per-cell δ (today the phase-2
+  counts are raw; the pb-level δ-correction does not reach the cells).
 
 * [ ] open question: how should we model multi-resolution Y (gene RNA/ATAC) ~ X (ATAC peaks, 1kb / 10kb / 100kb)?
 
