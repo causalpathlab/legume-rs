@@ -22,10 +22,10 @@ fn pseudobulk_levels_then_cells_in_order_with_sorted_unique_features() {
     assert_eq!(u.n_units(), 4);
     assert_eq!(u.level, vec![0, 0, 1, 2]);
     assert_eq!(u.source_index, vec![0, 1, 0, 7]);
-    assert_eq!(u.feats[0], vec![0, 2]);
-    assert_eq!(u.counts[0], vec![1.0, 3.0]);
+    assert_eq!(u.axes[0].feats[0], vec![0, 2]);
+    assert_eq!(u.axes[0].counts[0], vec![1.0, 3.0]);
     assert_eq!(u.total, vec![4.0, 5.0, 2.0, 10.0]);
-    assert_eq!(u.feats[3], vec![1, 3]);
+    assert_eq!(u.axes[0].feats[3], vec![1, 3]);
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn a_pseudobulk_with_no_edges_is_kept_as_an_empty_unit() {
     let l0 = vec![t(0, 0, 1.0), t(2, 1, 2.0)];
     let u = UnitTable::from_pseudobulks_and_cells(&[&l0], &[3], &[], None, 2);
     assert_eq!(u.n_units(), 3);
-    assert!(u.feats[1].is_empty());
+    assert!(u.axes[0].feats[1].is_empty());
     assert_eq!(u.total[1], 0.0);
     assert_eq!(u.weight[1], 0.0);
 }
@@ -52,7 +52,7 @@ fn a_pseudobulk_with_no_edges_is_kept_as_an_empty_unit() {
 fn zero_and_negative_counts_are_dropped() {
     let l0 = vec![t(0, 0, 0.0), t(0, 1, 2.0), t(0, 2, -1.0)];
     let u = UnitTable::from_pseudobulks_and_cells(&[&l0], &[1], &[], None, 3);
-    assert_eq!(u.feats[0], vec![1]);
+    assert_eq!(u.axes[0].feats[0], vec![1]);
 }
 
 #[test]
@@ -61,9 +61,9 @@ fn a_trailing_pseudobulk_with_no_edges_is_still_a_row() {
     let l0 = vec![t(0, 0, 1.0)];
     let u = UnitTable::from_pseudobulks_and_cells(&[&l0], &[3], &[], None, 2);
     assert_eq!(u.n_units(), 3);
-    assert_eq!(u.feats[0], vec![0]);
-    assert!(u.feats[1].is_empty());
-    assert!(u.feats[2].is_empty());
+    assert_eq!(u.axes[0].feats[0], vec![0]);
+    assert!(u.axes[0].feats[1].is_empty());
+    assert!(u.axes[0].feats[2].is_empty());
     assert_eq!(u.level, vec![0, 0, 0]);
     assert_eq!(u.source_index, vec![0, 1, 2]);
 }
@@ -88,7 +88,7 @@ fn cell_counts_are_divided_by_the_batch_fold() {
 
     assert_eq!(u.n_units(), 1);
     // 8.0 / 2.0 = 4.0, 8.0 / 4.0 = 2.0
-    assert_eq!(u.counts[0], vec![4.0, 2.0]);
+    assert_eq!(u.axes[0].counts[0], vec![4.0, 2.0]);
     assert_eq!(u.total[0], 6.0);
 }
 
@@ -141,29 +141,41 @@ fn the_untracked_constructor_is_the_base_track_spec() {
     assert_eq!(plain.n_tracks(), 1);
     assert_eq!(plain.total, tracked.total);
     assert_eq!(plain.weight, tracked.weight);
-    assert_eq!(plain.feats, tracked.feats);
-    assert_eq!(plain.counts, tracked.counts);
+    assert_eq!(plain.axes[0].feats, tracked.axes[0].feats);
+    assert_eq!(plain.axes[0].counts, tracked.axes[0].counts);
 }
 
 #[test]
-fn dual_count_unit_has_nonempty_rna_and_atac_vectors() {
-    // One pb level, one unit: RNA on genes 0,1; ATAC on peak 0.
+fn gene_only_constructor_is_one_axis() {
+    let l0 = vec![t(0, 0, 1.0)];
+    let u = UnitTable::from_pseudobulks_and_cells(&[&l0], &[1], &[], None, 2);
+    assert_eq!(u.n_axes(), 1);
+    assert_eq!(u.axes[0].n_features, 2);
+    assert_eq!(u.axes[0].feats[0], vec![0]);
+    assert_eq!(u.n_features(), 2);
+}
+
+#[test]
+fn two_sparse_axes_on_one_unit() {
+    // One pb level, one unit: axis 0 (genes 0,1); axis 1 (peak 0).
     let rna = vec![t(0, 0, 2.0), t(0, 1, 3.0)];
     let atac = vec![t(0, 0, 5.0)];
-    let u = UnitTable::from_dual_pseudobulks(&[&rna], &[&atac], &[1], 2, 1);
+    let u = UnitTable::from_pseudobulk_axes(&[&[&rna], &[&atac]], &[1], &[2, 1]);
     assert_eq!(u.n_units(), 1);
-    assert_eq!(u.n_features, 2);
-    assert_eq!(u.n_peaks, 1);
-    assert!(!u.feats[0].is_empty());
-    assert!(!u.counts[0].is_empty());
-    assert!(!u.peak_feats[0].is_empty());
-    assert!(!u.peak_counts[0].is_empty());
-    assert_eq!(u.feats[0], vec![0, 1]);
-    assert_eq!(u.counts[0], vec![2.0, 3.0]);
-    assert_eq!(u.peak_feats[0], vec![0]);
-    assert_eq!(u.peak_counts[0], vec![5.0]);
+    assert_eq!(u.n_axes(), 2);
+    assert_eq!(u.axes[0].n_features, 2);
+    assert_eq!(u.axes[1].n_features, 1);
+    assert!(!u.axes[0].feats[0].is_empty());
+    assert!(!u.axes[0].counts[0].is_empty());
+    assert!(!u.axes[1].feats[0].is_empty());
+    assert!(!u.axes[1].counts[0].is_empty());
+    assert_eq!(u.axes[0].feats[0], vec![0, 1]);
+    assert_eq!(u.axes[0].counts[0], vec![2.0, 3.0]);
+    assert_eq!(u.axes[1].feats[0], vec![0]);
+    assert_eq!(u.axes[1].counts[0], vec![5.0]);
+    assert_eq!(u.axes[0].total[0], 5.0);
+    assert_eq!(u.axes[1].total[0], 5.0);
     assert_eq!(u.total[0], 5.0);
-    assert_eq!(u.peak_total[0], 5.0);
 }
 
 #[test]

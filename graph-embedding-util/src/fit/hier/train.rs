@@ -160,7 +160,7 @@ pub fn train(
     let sup = TrackSupport::new(&units.tracks, &part);
     let (n_u, n_m, d) = (units.n_units(), part.n_modules(), units.tracks.n_genes());
     let n_t = units.n_tracks();
-    let n_features = units.n_features;
+    let n_features = units.n_features();
     let mut params =
         HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.offset_rank, cfg.seed, &cfg.device)?;
     if let Some(f) = preset {

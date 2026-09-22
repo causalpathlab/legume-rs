@@ -1,23 +1,16 @@
-//! Hard gene→module partition and each unit's view through it.
+//! Hard feature→module partition and each unit's view through it.
 
 use super::units::UnitTable;
 use crate::fit::config::TrackSpec;
 
-/// Shared bipartite module partition over genes and peaks.
+/// One module per feature id on a single axis: `module_of` is indexed by
+/// feature id, `members[m]` lists that module's feature ids in ascending order.
 ///
-/// One module index `m = 0..M−1`. Each gene and each peak has exactly one hard
-/// label. `module_of` / `members` are the gene axis (kept for existing callers);
-/// `module_of_peak` / `peak_members` are the peak axis. Peaks are **not** a
-/// [`TrackSpec`] track of genes.
+/// Multi-axis fits hold a `Vec<Partition>` (one per feature axis). Gene-only
+/// fits use a single partition over genes.
 pub struct Partition {
-    /// Module label per gene id (= [`Self::module_of_gene`]).
     pub module_of: Vec<u32>,
-    /// Gene members per module, ascending (= [`Self::gene_members`]).
     pub members: Vec<Vec<u32>>,
-    /// Module label per peak id.
-    pub module_of_peak: Vec<u32>,
-    /// Peak members per module, ascending.
-    pub peak_members: Vec<Vec<u32>>,
 }
 
 /// Hard labels from a soft membership `[D × M]`: the argmax column per row
@@ -41,39 +34,19 @@ pub fn labels_from_membership(pi: &nalgebra::DMatrix<f32>) -> Vec<u32> {
 }
 
 impl Partition {
-    /// Gene-only labels (`labels.len() == n_genes`); peak side is empty.
+    /// `labels` is one module per feature (`labels.len() == n_features` on that
+    /// axis). Members of each module are sorted.
     pub fn from_labels(labels: &[u32], n_modules: usize) -> Self {
-        Self::from_gene_peak_labels(labels, &[], n_modules)
-    }
-
-    /// Hard labels for genes and peaks into a shared module index.
-    ///
-    /// `gene_labels.len()` is `n_genes`; `peak_labels.len()` is `n_peaks`.
-    /// Each label must be `< n_modules`. Members of each module are sorted.
-    pub fn from_gene_peak_labels(
-        gene_labels: &[u32],
-        peak_labels: &[u32],
-        n_modules: usize,
-    ) -> Self {
         let mut members: Vec<Vec<u32>> = vec![Vec::new(); n_modules];
-        for (g, &m) in gene_labels.iter().enumerate() {
+        for (g, &m) in labels.iter().enumerate() {
             members[m as usize].push(g as u32);
-        }
-        let mut peak_members: Vec<Vec<u32>> = vec![Vec::new(); n_modules];
-        for (p, &m) in peak_labels.iter().enumerate() {
-            peak_members[m as usize].push(p as u32);
         }
         for m in &mut members {
             m.sort_unstable();
         }
-        for m in &mut peak_members {
-            m.sort_unstable();
-        }
         Self {
-            module_of: gene_labels.to_vec(),
+            module_of: labels.to_vec(),
             members,
-            module_of_peak: peak_labels.to_vec(),
-            peak_members,
         }
     }
 
@@ -81,35 +54,12 @@ impl Partition {
         self.members.len()
     }
 
-    /// Module label per gene id.
-    #[must_use]
-    pub fn module_of_gene(&self) -> &[u32] {
-        &self.module_of
-    }
-
-    /// Gene members per module (ascending).
-    #[must_use]
-    pub fn gene_members(&self) -> &[Vec<u32>] {
-        &self.members
-    }
-
-    /// Position of each gene in its module's member list.
+    /// Position of each feature in its module's member list.
     pub fn slot_of(&self) -> Vec<u32> {
         let mut slot = vec![0u32; self.module_of.len()];
         for m in &self.members {
             for (s, &g) in m.iter().enumerate() {
                 slot[g as usize] = s as u32;
-            }
-        }
-        slot
-    }
-
-    /// Position of each peak in its module's peak-member list.
-    pub fn peak_slot_of(&self) -> Vec<u32> {
-        let mut slot = vec![0u32; self.module_of_peak.len()];
-        for m in &self.peak_members {
-            for (s, &p) in m.iter().enumerate() {
-                slot[p as usize] = s as u32;
             }
         }
         slot
@@ -229,6 +179,9 @@ pub type UnitBuckets = Vec<((u32, u32), Vec<(u32, f32)>)>;
 /// by [`UnitModules::idx`]; `q[idx(u, t, ·)]` sums to 1 when unit `u` has any
 /// counts on track `t` and is all-zero otherwise; `by_module[u]` is sorted by
 /// `(track, module)` and holds only the `(t, m)` pairs the unit has counts in.
+///
+/// Built from `axes[0]` (the gene / TrackSpec axis). Additional feature axes
+/// are not folded here — Task 2 loops L1/L2 per partition.
 pub struct UnitModules {
     pub n_tracks: usize,
     pub n_modules: usize,
@@ -261,6 +214,7 @@ impl UnitModules {
     }
 
     pub fn new(units: &UnitTable, part: &Partition) -> Self {
+        let axis0 = &units.axes[0];
         let (n_u, m) = (units.n_units(), part.n_modules());
         let n_t = units.n_tracks();
         let slot = part.slot_of();
@@ -272,7 +226,7 @@ impl UnitModules {
         // the slots come out ascending too.
         let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_t * m];
         for u in 0..n_u {
-            for (&row, &c) in units.feats[u].iter().zip(&units.counts[u]) {
+            for (&row, &c) in axis0.feats[u].iter().zip(&axis0.counts[u]) {
                 let t = units.tracks.track_of_row[row as usize] as usize;
                 let g = units.tracks.gene_of_row[row as usize] as usize;
                 let mm = part.module_of[g] as usize;

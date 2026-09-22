@@ -22,16 +22,19 @@ fn from_labels_groups_members_sorted_and_keeps_empty_modules() {
 }
 
 #[test]
-fn bipartite_module_holds_genes_and_peaks() {
-    // genes {0,1} and peak {0} share module 0; gene 2 alone in module 1
-    let p = Partition::from_gene_peak_labels(&[0, 0, 1], &[0], 2);
-    assert_eq!(p.n_modules(), 2);
-    assert_eq!(p.module_of_gene(), &[0, 0, 1]);
-    assert_eq!(p.module_of_peak, vec![0]);
-    assert_eq!(p.gene_members()[0], vec![0, 1]);
-    assert_eq!(p.gene_members()[1], vec![2]);
-    assert_eq!(p.peak_members[0], vec![0]);
-    assert!(p.peak_members[1].is_empty());
+fn two_homogeneous_partitions_over_genes_and_peaks() {
+    // Independent partitions: 3 genes → 2 modules; 2 peaks → 2 modules.
+    // Module indices are per-partition (not a shared bipartite id).
+    let genes = Partition::from_labels(&[0, 0, 1], 2);
+    let peaks = Partition::from_labels(&[1, 0], 2);
+    let partitions = vec![genes, peaks];
+    assert_eq!(partitions.len(), 2);
+    assert_eq!(partitions[0].module_of, vec![0, 0, 1]);
+    assert_eq!(partitions[0].members[0], vec![0, 1]);
+    assert_eq!(partitions[0].members[1], vec![2]);
+    assert_eq!(partitions[1].module_of, vec![1, 0]);
+    assert_eq!(partitions[1].members[0], vec![1]);
+    assert_eq!(partitions[1].members[1], vec![0]);
 }
 
 #[test]
