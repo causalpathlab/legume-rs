@@ -253,12 +253,6 @@ pub struct PeakToGeneArgs {
     )]
     num_clusters: Option<usize>,
 
-    #[arg(
-        long,
-        help = "Skip the per-cell embedding; cluster the finest pseudobulks instead"
-    )]
-    no_cell_embedding: bool,
-
     /* Output */
     #[arg(
         long,
@@ -330,7 +324,7 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
 
     let peak_coords = parse_peak_coordinates(&peak_names);
     let gene_tss = load_gene_tss_aligned(args, &gene_names)?;
-    let cells = cell_inputs(args, &paired, &cell_to_pb)?;
+    let cells = cell_inputs(&paired, &cell_to_pb)?;
 
     finish_workflow(
         args,
@@ -342,26 +336,22 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             gene_names: &gene_names,
             peak_names: &peak_names,
         },
-        cells.as_ref(),
+        &cells,
     )
 }
 
 /// The phase-2 inputs: every backend of the stack in order (RNA then ATAC, or
 /// ATAC alone), the barcodes, and the finest pb of every cell.
 fn cell_inputs<'a>(
-    args: &PeakToGeneArgs,
     paired: &'a crate::p2g::input::PairedDataWithBatch,
     cell_to_pb: &'a [usize],
-) -> anyhow::Result<Option<CellInputs<'a>>> {
-    if args.no_cell_embedding {
-        return Ok(None);
-    }
+) -> anyhow::Result<CellInputs<'a>> {
     let backends: Vec<&SparseIoVec> = paired.data_stack.stack.iter().collect();
-    Ok(Some(CellInputs {
+    Ok(CellInputs {
         backends,
         barcodes: paired.data_stack.column_names()?,
         cell_to_pb,
-    }))
+    })
 }
 
 fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
@@ -440,7 +430,7 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             rna_pb[(new_g, j)] = activity[(old_g, j)];
         }
     }
-    let cells = cell_inputs(args, &paired, &cell_to_pb)?;
+    let cells = cell_inputs(&paired, &cell_to_pb)?;
 
     finish_workflow(
         args,
@@ -452,7 +442,7 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             gene_names: &gene_names,
             peak_names: &peak_names,
         },
-        cells.as_ref(),
+        &cells,
     )
 }
 
@@ -465,7 +455,7 @@ fn warn_few_samples(n_pb: usize, args: &PeakToGeneArgs) {
 fn finish_workflow(
     args: &PeakToGeneArgs,
     pb: PbMultiome<'_>,
-    cells: Option<&CellInputs<'_>>,
+    cells: &CellInputs<'_>,
 ) -> anyhow::Result<()> {
     let params = WorkflowParams {
         abc: LinkParams {

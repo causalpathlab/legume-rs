@@ -37,7 +37,8 @@ pub struct PeakGeneEmbeds {
 }
 
 impl PeakGeneEmbeds {
-    pub fn finest_unit_rows(&self) -> Mat {
+    /// The finest pb rows, L2-normalised, as written to `pb_embedding.parquet`.
+    fn finest_unit_rows(&self) -> Mat {
         let rows = &self.pb[0];
         let mut m = Mat::from_fn(rows.len(), self.dim, |i, d| rows[i][d]);
         l2_normalize_rows_inplace(&mut m);

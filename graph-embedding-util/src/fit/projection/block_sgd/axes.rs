@@ -14,7 +14,7 @@
 //! the score-clamp floor. See the module docs of [`super`] for why the
 //! gradient is closed-form and why `N` is dense per block.
 
-use super::edges::{block_cells, EdgeTable};
+use super::edges::block_cells;
 use super::pass::{adam_step_size, poisson_deviance, BlockProgress, PassStats};
 use super::{BETA1, BETA2, CHECK_EVERY, EPS, GATE_FOLD_EPS, MAX_STEPS, TARGET_DELTA_S, TOL};
 use crate::cell_projection::SCORE_CLAMP;
@@ -49,9 +49,6 @@ pub struct GroupOut {
 struct AxisDesign {
     label: String,
     n_features: usize,
-    /// Every feature id of the axis, `0..F`: the partition an [`EdgeTable`]
-    /// is flattened against.
-    rows: Vec<u32>,
     /// Feature id → live-local id; `u32::MAX` for a gate-folded feature.
     to_live: Vec<u32>,
     f_live: usize,
@@ -125,7 +122,6 @@ fn build_axis(
     Ok(AxisDesign {
         label: dict.label.to_string(),
         n_features,
-        rows: (0..n_features as u32).collect(),
         to_live,
         f_live,
         e_aug,
@@ -235,21 +231,6 @@ impl AxesProjector {
                 per_cell.len()
             );
         }
-        // One edge table per axis, flattened once per group.
-        let edges: Vec<EdgeTable> = self
-            .axes
-            .iter()
-            .zip(&group.axes)
-            .map(|(ax, per_cell)| {
-                let cells: Vec<(u32, &[u32], &[f32])> = per_cell
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (f, c))| (i as u32, f.as_slice(), c.as_slice()))
-                    .collect();
-                EdgeTable::build(&cells, &ax.rows, ax.n_features, None)
-            })
-            .collect();
-
         let bc = self.block_cells;
         let mut theta = vec![0f32; n * h];
         let mut intercepts = vec![vec![-(SCORE_CLAMP as f32); n]; self.axes.len()];
@@ -258,7 +239,7 @@ impl AxesProjector {
         for (b, start) in (0..n).step_by(bc).enumerate() {
             let end = (start + bc).min(n);
             let out = self.solve_block(
-                &edges,
+                &group.axes,
                 start,
                 end,
                 &BlockProgress {
@@ -309,10 +290,11 @@ struct BlockOut {
 }
 
 impl AxesProjector {
+    /// One axis's counts of the cells `start..end` of a group, densely.
     fn gather(
         &self,
         ax: &AxisDesign,
-        edges: &EdgeTable,
+        per_cell: &[(Vec<u32>, Vec<f32>)],
         start: usize,
         end: usize,
     ) -> anyhow::Result<AxisBlock> {
@@ -322,11 +304,14 @@ impl AxesProjector {
         let mut n_tot = vec![0f64; bc];
         let mut n_dead = vec![0f32; bc];
         let mut n_edges = 0usize;
-        for i in start..end {
-            let local = i - start;
-            let (feats, counts) = edges.cell_slice(i);
+        for (local, (feats, counts)) in per_cell[start..end].iter().enumerate() {
             for (&f, &n) in feats.iter().zip(counts) {
-                // `rows` is the identity on an axis, so the pass-local id IS the feature id.
+                anyhow::ensure!(
+                    (f as usize) < ax.n_features,
+                    "axis {}: feature id {f} outside its {} features",
+                    ax.label,
+                    ax.n_features
+                );
                 let l = ax.to_live[f as usize];
                 n_tot[local] += f64::from(n);
                 if l == u32::MAX {
@@ -361,7 +346,7 @@ impl AxesProjector {
     /// conditional MLE at `Θ = 0`), floor for an absent axis.
     fn solve_block(
         &self,
-        edges: &[EdgeTable],
+        group_axes: &[Vec<(Vec<u32>, Vec<f32>)>],
         start: usize,
         end: usize,
         progress: &BlockProgress<'_>,
@@ -374,8 +359,8 @@ impl AxesProjector {
         let blocks: Vec<AxisBlock> = self
             .axes
             .iter()
-            .zip(edges)
-            .map(|(ax, e)| self.gather(ax, e, start, end))
+            .zip(group_axes)
+            .map(|(ax, per_cell)| self.gather(ax, per_cell, start, end))
             .collect::<anyhow::Result<_>>()?;
         let n_edges: usize = blocks.iter().map(|b| b.n_edges).sum();
 

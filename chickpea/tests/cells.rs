@@ -4,28 +4,9 @@ mod common;
 
 use chickpea::common::Mat;
 use chickpea::p2g::cells::{cluster_labels_to_pb, embed_cells, write_cell_parquet, FrozenAxis};
-use common::mat;
-use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
-use data_beans::sparse_io_vector::SparseIoVec;
+use common::{backend, barcodes, mat};
 use legume_numeric::candle::candle_core::Device;
 use std::path::Path;
-
-fn backend(m: &Mat) -> SparseIoVec {
-    let mut b = create_sparse_from_dmatrix(m, None, Some(&SparseIoBackend::Zarr)).unwrap();
-    b.register_row_names_vec(
-        &(0..m.nrows())
-            .map(|r| format!("f{r}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
-    b.register_column_names_vec(
-        &(0..m.ncols())
-            .map(|c| format!("cell_{c}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
-    let mut v = SparseIoVec::new();
-    v.push(std::sync::Arc::from(b), None).unwrap();
-    v
-}
 
 /// A dictionary that puts program-A features along +e0 and program-B along +e1.
 fn rows(n: usize, split: usize, dim: usize) -> Vec<Vec<f32>> {
@@ -51,10 +32,6 @@ fn counts(n_feat: usize, split: usize) -> Mat {
     })
 }
 
-fn barcodes(n: usize) -> Vec<Box<str>> {
-    (0..n).map(|c| format!("cell_{c}").into()).collect()
-}
-
 #[test]
 fn cells_land_on_their_programs_side_and_the_parquet_has_one_row_per_barcode() {
     let dim = 4;
@@ -76,15 +53,15 @@ fn cells_land_on_their_programs_side_and_the_parquet_has_one_row_per_barcode() {
         },
     ];
     let (rb, ab) = (backend(&rna), backend(&atac));
-    let out = embed_cells(&axes, &[&rb, &ab], barcodes(12), dim, &Device::Cpu).unwrap();
-    assert_eq!((out.theta.nrows(), out.theta.ncols()), (12, dim));
+    let theta = embed_cells(&axes, &[&rb, &ab], dim, &Device::Cpu).unwrap();
+    assert_eq!((theta.nrows(), theta.ncols()), (12, dim));
     for c in 0..12 {
         let (own, other) = if c < 6 { (0, 1) } else { (1, 0) };
-        assert!(out.theta[(c, own)] > out.theta[(c, other)], "cell {c}");
+        assert!(theta[(c, own)] > theta[(c, other)], "cell {c}");
     }
     let dir = tempfile::tempdir().unwrap();
     let prefix = dir.path().join("run").to_string_lossy().into_owned();
-    write_cell_parquet(&prefix, &out).unwrap();
+    write_cell_parquet(&prefix, &theta, &barcodes(12)).unwrap();
     assert!(Path::new(&format!("{prefix}.cell_embedding.parquet")).is_file());
 }
 
@@ -100,10 +77,10 @@ fn a_single_axis_run_embeds_on_that_axis_alone() {
         bias: &pb,
     }];
     let ab = backend(&atac);
-    let out = embed_cells(&axes, &[&ab], barcodes(12), dim, &Device::Cpu).unwrap();
+    let theta = embed_cells(&axes, &[&ab], dim, &Device::Cpu).unwrap();
     for c in 0..12 {
         let (own, other) = if c < 6 { (0, 1) } else { (1, 0) };
-        assert!(out.theta[(c, own)] > out.theta[(c, other)], "cell {c}");
+        assert!(theta[(c, own)] > theta[(c, other)], "cell {c}");
     }
 }
 
@@ -119,9 +96,7 @@ fn a_dictionary_that_does_not_match_the_backend_is_refused() {
         bias: &pb,
     }];
     let ab = backend(&atac);
-    let err = embed_cells(&axes, &[&ab], barcodes(12), dim, &Device::Cpu)
-        .err()
-        .expect("refused");
+    let err = embed_cells(&axes, &[&ab], dim, &Device::Cpu).expect_err("refused");
     assert!(err.to_string().contains("peak"), "{err}");
 }
 

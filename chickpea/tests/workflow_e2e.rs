@@ -7,9 +7,7 @@ use chickpea::p2g::embed_ge::HierEmbedConfig;
 use chickpea::p2g::link_map::LinkParams;
 use chickpea::p2g::pb_levels::PbLevels;
 use chickpea::p2g::workflow::*;
-use common::{peak, tss};
-use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
-use data_beans::sparse_io_vector::SparseIoVec;
+use common::{backend, barcodes, peak, tss};
 use genomic_data::coordinates::{GeneTss, PeakCoord};
 use legume_numeric::candle::candle_core::Device;
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -118,63 +116,6 @@ fn assert_outputs(out: &str) {
     }
 }
 
-#[test]
-fn e2e_writes_e2g_parquet_from_synthetic_pb() {
-    let f = fixture();
-    let levels = PbLevels {
-        rna: Some(vec![f.rna.clone(), sum_children(&f.rna, &f.parent)]),
-        atac: vec![f.atac.clone(), sum_children(&f.atac, &f.parent)],
-        parent: vec![f.parent.clone()],
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().to_string_lossy().into_owned();
-    run_from_pseudobulk(
-        &PbMultiome {
-            levels: &levels,
-            gene_activity: None,
-            gene_tss: &f.gene_tss,
-            peak_coords: &f.peak_coords,
-            gene_names: &f.gene_names,
-            peak_names: &f.peak_names,
-        },
-        None,
-        &out,
-        &params(),
-    )
-    .unwrap();
-    assert_outputs(&out);
-}
-
-/// ATAC-only: no RNA levels, a gene-activity surrogate at the finest level
-/// only. The embed must build the surrogate's coarse levels itself and still
-/// write every table.
-#[test]
-fn e2e_atac_only_with_two_levels_builds_the_surrogate_levels() {
-    let f = fixture();
-    let levels = PbLevels {
-        rna: None,
-        atac: vec![f.atac.clone(), sum_children(&f.atac, &f.parent)],
-        parent: vec![f.parent.clone()],
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().to_string_lossy().into_owned();
-    run_from_pseudobulk(
-        &PbMultiome {
-            levels: &levels,
-            gene_activity: Some(&f.rna),
-            gene_tss: &f.gene_tss,
-            peak_coords: &f.peak_coords,
-            gene_names: &f.gene_names,
-            peak_names: &f.peak_names,
-        },
-        None,
-        &out,
-        &params(),
-    )
-    .unwrap();
-    assert_outputs(&out);
-}
-
 /// Two cells per finest pb: the even cell gets the floor half of each count,
 /// the odd cell the rest, so cells sum back to their pb column.
 fn split_cells(pb: &Mat) -> (Mat, Vec<usize>) {
@@ -189,23 +130,6 @@ fn split_cells(pb: &Mat) -> (Mat, Vec<usize>) {
         }
     }
     (cells, (0..2 * n).map(|c| c / 2).collect())
-}
-
-fn backend(m: &Mat) -> SparseIoVec {
-    let mut b = create_sparse_from_dmatrix(m, None, Some(&SparseIoBackend::Zarr)).unwrap();
-    b.register_row_names_vec(
-        &(0..m.nrows())
-            .map(|r| format!("f{r}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
-    b.register_column_names_vec(
-        &(0..m.ncols())
-            .map(|c| format!("cell_{c}").into_boxed_str())
-            .collect::<Vec<_>>(),
-    );
-    let mut v = SparseIoVec::new();
-    v.push(std::sync::Arc::from(b), None).unwrap();
-    v
 }
 
 fn parquet_rows(path: &str) -> usize {
@@ -227,9 +151,7 @@ fn e2e_with_cells_writes_the_cell_embedding_and_clusters_cells() {
     let (rb, ab) = (backend(&rna_cells), backend(&atac_cells));
     let cells = CellInputs {
         backends: vec![&rb, &ab],
-        barcodes: (0..rna_cells.ncols())
-            .map(|c| format!("cell_{c}").into())
-            .collect(),
+        barcodes: barcodes(rna_cells.ncols()),
         cell_to_pb: &cell_to_pb,
     };
     let dir = tempfile::tempdir().unwrap();
@@ -243,7 +165,7 @@ fn e2e_with_cells_writes_the_cell_embedding_and_clusters_cells() {
             gene_names: &f.gene_names,
             peak_names: &f.peak_names,
         },
-        Some(&cells),
+        &cells,
         &out,
         &params(),
     )
@@ -268,9 +190,7 @@ fn e2e_atac_only_with_cells_projects_on_the_peak_axis_alone() {
     let ab = backend(&atac_cells);
     let cells = CellInputs {
         backends: vec![&ab],
-        barcodes: (0..atac_cells.ncols())
-            .map(|c| format!("cell_{c}").into())
-            .collect(),
+        barcodes: barcodes(atac_cells.ncols()),
         cell_to_pb: &cell_to_pb,
     };
     let dir = tempfile::tempdir().unwrap();
@@ -284,7 +204,7 @@ fn e2e_atac_only_with_cells_projects_on_the_peak_axis_alone() {
             gene_names: &f.gene_names,
             peak_names: &f.peak_names,
         },
-        Some(&cells),
+        &cells,
         &out,
         &params(),
     )

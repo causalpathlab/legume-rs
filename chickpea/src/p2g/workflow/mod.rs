@@ -49,12 +49,12 @@ pub struct PbMultiome<'a> {
 }
 
 /// Run the ge-util peak-to-gene workflow from paired RNA/ATAC pseudobulk
-/// matrices. With `cells`, every cell is projected onto the frozen
-/// dictionaries and the clusters are cell clusters; without, the finest pb
-/// rows are clustered.
+/// matrices and the cells behind them: every cell is projected onto the frozen
+/// dictionaries, the clusters are cell clusters, and each finest pb takes the
+/// majority label of its cells for the refine.
 pub fn run_from_pseudobulk(
     data: &PbMultiome<'_>,
-    cells: Option<&CellInputs<'_>>,
+    cells: &CellInputs<'_>,
     out_dir: &str,
     params: &WorkflowParams,
 ) -> anyhow::Result<()> {
@@ -111,29 +111,9 @@ pub fn run_from_pseudobulk(
 
     write_embedding_parquets(out_dir, &embeds)?;
 
-    // Sample labels for the refine: cell clusters mapped onto the finest pb
-    // columns when cells are given, else clusters of the finest pb rows.
-    let (sample_label, n_clusters) = match cells {
-        Some(c) => cluster_cells_onto_pbs(c, &embeds, levels, out_dir, params)?,
-        None => {
-            let sample_mat = embeds.finest_unit_rows();
-            info!(
-                "Clustering {} pb samples (min_cluster_samples={})...",
-                sample_mat.nrows(),
-                params.min_cluster_samples
-            );
-            let clusters = cluster_cells(
-                &sample_mat,
-                params.target_clusters,
-                params.min_cluster_samples,
-            )?;
-            info!(
-                "Kept {} clusters (sizes={:?})",
-                clusters.n_clusters, clusters.sizes
-            );
-            (clusters.label, clusters.n_clusters)
-        }
-    };
+    // Sample labels for the refine: cell clusters mapped onto the finest pb columns.
+    let (sample_label, n_clusters) =
+        cluster_cells_onto_pbs(cells, &embeds, levels, out_dir, params)?;
 
     info!("Refining peak→gene within clusters...");
     let links = refine_within_clusters(
@@ -197,21 +177,8 @@ fn cluster_cells_onto_pbs(
         info!("Cell embed: ATAC-only run, projecting on the peak axis alone");
         vec![peak_axis]
     };
-    anyhow::ensure!(
-        axes.len() == c.backends.len(),
-        "{} frozen axes for {} cell backends",
-        axes.len(),
-        c.backends.len()
-    );
-    let cell_out = embed_cells(
-        &axes,
-        &c.backends,
-        c.barcodes.clone(),
-        params.embed.dim,
-        &params.embed.device,
-    )?;
-    write_cell_parquet(out_dir, &cell_out)?;
-    let mut rows = cell_out.theta;
+    let mut rows = embed_cells(&axes, &c.backends, params.embed.dim, &params.embed.device)?;
+    write_cell_parquet(out_dir, &rows, &c.barcodes)?;
     l2_normalize_rows_inplace(&mut rows);
     info!(
         "Clustering {} cells (min_cluster_samples={})...",

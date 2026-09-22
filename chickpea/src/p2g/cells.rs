@@ -7,7 +7,7 @@ use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::projection::{
     project_cells_axes, stream_cell_groups, AxesProjector, AxisDict,
 };
-use graph_embedding_util::fit::PROJECTION_RIDGE_SGD;
+use graph_embedding_util::fit::{majority_batch_per_pb, PROJECTION_RIDGE_SGD};
 use graph_embedding_util::save_embedding;
 use legume_numeric::candle::candle_core::Device;
 use legume_numeric::matrix::traits::ConvertMatOps;
@@ -20,21 +20,15 @@ pub struct FrozenAxis<'a> {
     pub bias: &'a [f32],
 }
 
-pub struct CellEmbedOut {
-    /// `[n_cells × H]`, gauge-centred.
-    pub theta: Mat,
-    pub barcodes: Vec<Box<str>>,
-}
-
-/// Project every column of `backends` (one per axis, in `axes` order). The
-/// per-axis intercepts are solved but not kept: nothing downstream reads them.
+/// Project every column of `backends` (one per axis, in `axes` order) into
+/// `[n_cells × H]`, gauge-centred. The per-axis intercepts are solved but not
+/// kept: nothing downstream reads them.
 pub fn embed_cells(
     axes: &[FrozenAxis],
     backends: &[&SparseIoVec],
-    barcodes: Vec<Box<str>>,
     dim: usize,
     device: &Device,
-) -> anyhow::Result<CellEmbedOut> {
+) -> anyhow::Result<Mat> {
     anyhow::ensure!(
         axes.len() == backends.len(),
         "{} frozen axes for {} backends",
@@ -43,11 +37,6 @@ pub fn embed_cells(
     );
     anyhow::ensure!(!axes.is_empty(), "no feature axis to project on");
     let n_cells = backends[0].num_columns();
-    anyhow::ensure!(
-        barcodes.len() == n_cells,
-        "{} barcodes for {n_cells} cells",
-        barcodes.len()
-    );
     for (ax, b) in axes.iter().zip(backends) {
         anyhow::ensure!(
             ax.rows.len() == b.num_rows() && ax.bias.len() == b.num_rows(),
@@ -79,57 +68,37 @@ pub fn embed_cells(
     );
     let groups = stream_cell_groups(backends, projector.group_cells())?;
     let out = project_cells_axes(&projector, n_cells, groups)?;
-    let theta = Mat::from_row_slice(n_cells, dim, &out.theta);
-    Ok(CellEmbedOut { theta, barcodes })
+    Ok(Mat::from_row_slice(n_cells, dim, &out.theta))
 }
 
-/// `{prefix}.cell_embedding.parquet`: rows named by barcode.
-pub fn write_cell_parquet(prefix: &str, out: &CellEmbedOut) -> anyhow::Result<()> {
-    let path = format!("{prefix}.cell_embedding.parquet");
-    save_embedding(
-        &path,
-        &out.theta.to_tensor(&Device::Cpu)?,
-        &out.barcodes,
-        "cell",
-    )?;
-    info!(
-        "Wrote {path} ({} × {})",
-        out.theta.nrows(),
-        out.theta.ncols()
+/// `{prefix}.cell_embedding.parquet`: one row per barcode.
+pub fn write_cell_parquet(prefix: &str, theta: &Mat, barcodes: &[Box<str>]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        barcodes.len() == theta.nrows(),
+        "{} barcodes for {} embedded cells",
+        barcodes.len(),
+        theta.nrows()
     );
+    let path = format!("{prefix}.cell_embedding.parquet");
+    save_embedding(&path, &theta.to_tensor(&Device::Cpu)?, barcodes, "cell")?;
+    info!("Wrote {path} ({} × {})", theta.nrows(), theta.ncols());
     Ok(())
 }
 
-/// Each pb's label is the majority label of its cells (ties: lowest id);
-/// `None` for a pb with no labeled cell.
+/// Each pb's label is the majority label of its labeled cells (ties: lowest
+/// id); `None` for a pb with no labeled cell. Unlabeled cells do not vote.
 pub fn cluster_labels_to_pb(
     cell_label: &[Option<usize>],
     cell_to_pb: &[usize],
     n_pb: usize,
 ) -> Vec<Option<usize>> {
-    let n_clusters = cell_label
+    let (voters, labels): (Vec<usize>, Vec<u32>) = cell_label
         .iter()
-        .flatten()
-        .copied()
-        .max()
-        .map_or(0, |m| m + 1);
-    let mut votes = vec![vec![0usize; n_clusters]; n_pb];
-    for (&label, &pb) in cell_label.iter().zip(cell_to_pb) {
-        if let Some(l) = label {
-            votes[pb][l] += 1;
-        }
-    }
-    votes
-        .iter()
-        .map(|v| {
-            let best = v
-                .iter()
-                .enumerate()
-                .max_by_key(|&(i, &n)| (n, std::cmp::Reverse(i)));
-            match best {
-                Some((i, &n)) if n > 0 => Some(i),
-                _ => None,
-            }
-        })
+        .zip(cell_to_pb)
+        .filter_map(|(l, &pb)| l.map(|l| (pb, l as u32)))
+        .unzip();
+    majority_batch_per_pb(&voters, &labels, n_pb)
+        .into_iter()
+        .map(|m| (m != u32::MAX).then_some(m as usize))
         .collect()
 }

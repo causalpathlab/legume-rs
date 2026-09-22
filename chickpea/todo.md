@@ -62,7 +62,7 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   backends in groups. chickpea projects every cell onto the frozen gene and peak
   dictionaries, writes `{out}.cell_embedding.parquet`, clusters cells, and labels each
   finest pb by the majority of its cells for the refine. ATAC-only projects on the peak
-  axis alone. `--no-cell-embedding` keeps the pb-only path. `tracks.rs` / `polish_cells`
+  axis alone; the pb-only clustering path is gone. `tracks.rs` / `polish_cells`
   untouched (senna follow-up: encoder-only vs solve-only, then route bge onto this engine).
 
 * [ ] batch fold in phase 2 once the collapse exposes a per-cell δ (today the phase-2

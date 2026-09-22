@@ -32,21 +32,21 @@ fn read_group(backends: &[&SparseIoVec], start: usize, end: usize) -> anyhow::Re
     let n = end - start;
     let mut axes: Vec<Vec<(Vec<u32>, Vec<f32>)>> = Vec::with_capacity(backends.len());
     for b in backends {
-        let mut rows: Vec<(Vec<u32>, Vec<f32>)> = vec![(Vec::new(), Vec::new()); n];
+        let mut pairs: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n];
         b.for_each_triplet(start..end, n, |row, local_col, v| {
             if v > 0.0 {
-                let r = &mut rows[local_col as usize];
-                r.0.push(row as u32);
-                r.1.push(v);
+                pairs[local_col as usize].push((row as u32, v));
             }
         })?;
-        for (f, c) in &mut rows {
-            let mut idx: Vec<usize> = (0..f.len()).collect();
-            idx.sort_unstable_by_key(|&i| f[i]);
-            *f = idx.iter().map(|&i| f[i]).collect();
-            *c = idx.iter().map(|&i| c[i]).collect();
-        }
-        axes.push(rows);
+        axes.push(
+            pairs
+                .into_iter()
+                .map(|mut p| {
+                    p.sort_unstable_by_key(|&(f, _)| f);
+                    p.into_iter().unzip()
+                })
+                .collect(),
+        );
     }
     Ok(CellGroup {
         cells: (start as u32..end as u32).collect(),

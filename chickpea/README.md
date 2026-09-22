@@ -27,8 +27,7 @@
    unlinked peaks are clustered on their own. Then every cell is projected
    onto the frozen gene and peak dictionaries (one Poisson partition and one
    intercept per axis, one shared latent), streamed from the backends in
-   groups so nothing dense over cells and features is built;
-   `--no-cell-embedding` skips this and clusters the finest pseudobulks instead.
+   groups so nothing dense over cells and features is built.
 4. **Cluster the cells** (Leiden on the L2-normalised rows), label each finest
    pseudobulk by the majority of its cells, and **recompute the link within
    each cluster** (same score on the cluster's pseudobulk columns): one link
