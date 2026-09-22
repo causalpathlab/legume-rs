@@ -8,14 +8,14 @@ use graph_embedding_util::fit::projection::{
 };
 use legume_numeric::candle::candle_core::Device;
 
-fn dictionary(n_feat: usize, h: usize, scale: f32, salt: usize) -> (Vec<f32>, Vec<f32>) {
+fn dictionary(n_feat: usize, h: usize, scale: f32, shift: usize) -> (Vec<f32>, Vec<f32>) {
     let mut e = vec![0f32; n_feat * h];
     let mut b = vec![0f32; n_feat];
     for f in 0..n_feat {
         for k in 0..h {
-            e[f * h + k] = (((((f + salt) * 7 + k * 13) % 11) as f32 / 11.0) - 0.5) * scale;
+            e[f * h + k] = (((((f + shift) * 7 + k * 13) % 11) as f32 / 11.0) - 0.5) * scale;
         }
-        b[f] = ((((f + salt) * 5) % 7) as f32 / 7.0) - 0.3;
+        b[f] = ((((f + shift) * 5) % 7) as f32 / 7.0) - 0.3;
     }
     (e, b)
 }
