@@ -68,6 +68,25 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
 * [ ] batch fold in phase 2 once the collapse exposes a per-cell δ (today the phase-2
   counts are raw; the pb-level δ-correction does not reach the cells).
 
+* [x] 2026-09-22, first real run on a public 10x PBMC multiome set (about 12k cells,
+  37k genes, 144k peaks; two backends from one 10x h5 via `data-beans from-10x-matrix
+  --select-row-type`): the cell embedding separates the expected lineages by marker
+  genes. The per-cell projection is most of the wall time at real peak counts (blocks
+  are sized by the activation budget, so a block is a few hundred cells at 180k
+  features); the hier fit and the refine are minor.
+
+* [ ] **write per-cell cluster labels.** `clusters.parquet` lists ids only; nothing maps a
+  barcode to its cluster, so cluster → cell type has to be redone outside. Write
+  `{out}.cell_clusters.parquet` (cell, cluster) next to the cell embedding.
+
+* [ ] **phase 2 speed at real peak counts.** Device off CPU, a lower step cap once the
+  convergence test is trusted, or a coarser gate fold; measure on the PBMC run above.
+
+* [ ] **link stage barely favors promoter-proximal peaks on real data.** The top-scoring
+  peak per gene and cluster lies within 5 kb of the TSS only slightly more often than a
+  random candidate does, and its median distance is ~200 kb. Same conclusion as the sim:
+  the Pearson link is the weak stage; see the link-fine-tuning item above.
+
 * [ ] open question: how should we model multi-resolution Y (gene RNA/ATAC) ~ X (ATAC peaks, 1kb / 10kb / 100kb)?
 
 * removed (e13492ab): rSVD ATAC embedding, SuSiE-RSS on embedding z/R, GhostKnockoff FDR,
