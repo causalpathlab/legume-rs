@@ -74,13 +74,25 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   matrices. Caveat: the sim has no bystander that co-varies through shared state, so 2
   can only be shown not to lose on the easy case until that simulator knob exists.
 
-* [ ] **phase 2 by distilled encoders instead of the cold per-cell solve** (in flight
-  2026-09-22). The cold block SGD runs to its step cap on real data and took 12.5 of 16
-  min on the PBMC set; the per-axis encoder path (one trunk per axis distilled onto the
-  phase-1 pb tables, refined on the cells' likelihood summed over axes, no polish) is
-  implemented and being measured against the cold MAP on the same cells (cluster ARI,
-  kNN overlap, side-by-side UMAP). Whichever loses is deleted: one estimator. The same
-  rule applies to senna bge (encoder + polish is two solvers for one convex answer).
+* [x] **phase 2 by distilled encoders, measured and rejected** (2026-09-22). Implemented
+  the per-axis encoder path (one trunk per axis distilled onto the phase-1 pb tables,
+  refined on the cells' likelihood summed over axes, no polish) and compared it with the
+  cold per-cell MAP on the same PBMC cells. The encoder lost on every count: the B-cell
+  island dissolved into the lymphoid and myeloid arcs, NK and T mixed, cluster agreement
+  with the MAP was low (ARI 0.40, 15-NN overlap 0.14), cluster markers were less clean,
+  and it was slower (23 min vs 16), because the likelihood refine runs on one core
+  (candle's CPU elementwise and reduction ops over the 180k feature axis are
+  single-threaded) while moving the loss by a tenth of a percent. Distillation alone
+  reached held-out cosine 0.93 on pb targets in 3 min, but the pb tables are too coarse a
+  target to place cells within a lineage. The cold solver stays; the encoder code is not
+  kept. Same lesson for senna bge: the encoder's placement is not a substitute for the
+  per-cell solve there either, so the thing to delete is the encoder, not the polish.
+
+* [ ] **phase 2 speed for the cold solver at real peak counts.** The solver averaged five
+  cores and ran to the step cap on most blocks. Levers, cheapest first: warm-start each
+  cell at its finest pseudobulk's phase-1 embedding (cuts the cold budget to the polish
+  budget; the tables are already in memory), a per-axis convergence tolerance for the
+  clustering use, CUDA when available (metal is not fast enough on this class of GPU).
 
 * [ ] **gene–peak co-embedding term.** Genes and peaks share a space only through the
   unit table; no loss term touches a gene and a peak directly, the cis links only seed
@@ -110,9 +122,6 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
 * [ ] **write per-cell cluster labels.** `clusters.parquet` lists ids only; nothing maps a
   barcode to its cluster, so cluster → cell type has to be redone outside. Write
   `{out}.cell_clusters.parquet` (cell, cluster) next to the cell embedding.
-
-* [ ] **phase 2 speed at real peak counts.** Device off CPU, a lower step cap once the
-  convergence test is trusted, or a coarser gate fold; measure on the PBMC run above.
 
 * [ ] **link stage barely favors promoter-proximal peaks on real data.** The top-scoring
   peak per gene and cluster lies within 5 kb of the TSS only slightly more often than a
