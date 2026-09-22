@@ -154,6 +154,8 @@ pub fn query_load(
     mut args: ReadSharedRowsArgs,
     trained_features: &[Box<str>],
 ) -> anyhow::Result<ReadSharedRowsArgs> {
+    // Query cells are never silently dropped: every input column comes back.
+    args.keep_empty_barcodes = true;
     let Some(plan) = query_layout(&args.data_files, trained_features)? else {
         return Ok(args);
     };

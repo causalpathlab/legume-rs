@@ -596,6 +596,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         qc_report_out: args.qc_report_out.map(Box::<str>::from),
         per_file_feature_suffix: None,
         per_file_barcode_suffix: None,
+        keep_empty_barcodes: false,
     })?;
     if args.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch");

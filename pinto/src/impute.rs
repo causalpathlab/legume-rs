@@ -210,6 +210,8 @@ fn open_backends(what: &str, files: &[Box<str>], preload: bool) -> anyhow::Resul
         data_beans::aux::data_loading::ReadSharedRowsArgs {
             data_files: files.to_vec(),
             preload,
+            // Inference: every reference and query column comes back.
+            keep_empty_barcodes: true,
             ..Default::default()
         },
     )?;
