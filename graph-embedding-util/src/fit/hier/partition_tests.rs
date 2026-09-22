@@ -22,6 +22,19 @@ fn from_labels_groups_members_sorted_and_keeps_empty_modules() {
 }
 
 #[test]
+fn bipartite_module_holds_genes_and_peaks() {
+    // genes {0,1} and peak {0} share module 0; gene 2 alone in module 1
+    let p = Partition::from_gene_peak_labels(&[0, 0, 1], &[0], 2);
+    assert_eq!(p.n_modules(), 2);
+    assert_eq!(p.module_of_gene(), &[0, 0, 1]);
+    assert_eq!(p.module_of_peak, vec![0]);
+    assert_eq!(p.gene_members()[0], vec![0, 1]);
+    assert_eq!(p.gene_members()[1], vec![2]);
+    assert_eq!(p.peak_members[0], vec![0]);
+    assert!(p.peak_members[1].is_empty());
+}
+
+#[test]
 fn composition_is_count_share_per_module_and_by_module_uses_slots() {
     // genes 0,2 → module 1; gene 1 → module 0
     let p = Partition::from_labels(&[1, 0, 1], 2);

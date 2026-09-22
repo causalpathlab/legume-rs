@@ -3,12 +3,21 @@
 use super::units::UnitTable;
 use crate::fit::config::TrackSpec;
 
-/// One module per GENE (not per feature row): tracks of the same gene share a
-/// module. `module_of` is indexed by gene id, `members[m]` lists that module's
-/// gene ids in ascending order.
+/// Shared bipartite module partition over genes and peaks.
+///
+/// One module index `m = 0..M−1`. Each gene and each peak has exactly one hard
+/// label. `module_of` / `members` are the gene axis (kept for existing callers);
+/// `module_of_peak` / `peak_members` are the peak axis. Peaks are **not** a
+/// [`TrackSpec`] track of genes.
 pub struct Partition {
+    /// Module label per gene id (= [`Self::module_of_gene`]).
     pub module_of: Vec<u32>,
+    /// Gene members per module, ascending (= [`Self::gene_members`]).
     pub members: Vec<Vec<u32>>,
+    /// Module label per peak id.
+    pub module_of_peak: Vec<u32>,
+    /// Peak members per module, ascending.
+    pub peak_members: Vec<Vec<u32>>,
 }
 
 /// Hard labels from a soft membership `[D × M]`: the argmax column per row
@@ -32,18 +41,39 @@ pub fn labels_from_membership(pi: &nalgebra::DMatrix<f32>) -> Vec<u32> {
 }
 
 impl Partition {
-    /// `labels` is one module per GENE (`labels.len() == n_genes`).
+    /// Gene-only labels (`labels.len() == n_genes`); peak side is empty.
     pub fn from_labels(labels: &[u32], n_modules: usize) -> Self {
+        Self::from_gene_peak_labels(labels, &[], n_modules)
+    }
+
+    /// Hard labels for genes and peaks into a shared module index.
+    ///
+    /// `gene_labels.len()` is `n_genes`; `peak_labels.len()` is `n_peaks`.
+    /// Each label must be `< n_modules`. Members of each module are sorted.
+    pub fn from_gene_peak_labels(
+        gene_labels: &[u32],
+        peak_labels: &[u32],
+        n_modules: usize,
+    ) -> Self {
         let mut members: Vec<Vec<u32>> = vec![Vec::new(); n_modules];
-        for (g, &m) in labels.iter().enumerate() {
+        for (g, &m) in gene_labels.iter().enumerate() {
             members[m as usize].push(g as u32);
+        }
+        let mut peak_members: Vec<Vec<u32>> = vec![Vec::new(); n_modules];
+        for (p, &m) in peak_labels.iter().enumerate() {
+            peak_members[m as usize].push(p as u32);
         }
         for m in &mut members {
             m.sort_unstable();
         }
+        for m in &mut peak_members {
+            m.sort_unstable();
+        }
         Self {
-            module_of: labels.to_vec(),
+            module_of: gene_labels.to_vec(),
             members,
+            module_of_peak: peak_labels.to_vec(),
+            peak_members,
         }
     }
 
@@ -51,11 +81,35 @@ impl Partition {
         self.members.len()
     }
 
+    /// Module label per gene id.
+    #[must_use]
+    pub fn module_of_gene(&self) -> &[u32] {
+        &self.module_of
+    }
+
+    /// Gene members per module (ascending).
+    #[must_use]
+    pub fn gene_members(&self) -> &[Vec<u32>] {
+        &self.members
+    }
+
+    /// Position of each gene in its module's member list.
     pub fn slot_of(&self) -> Vec<u32> {
         let mut slot = vec![0u32; self.module_of.len()];
         for m in &self.members {
             for (s, &g) in m.iter().enumerate() {
                 slot[g as usize] = s as u32;
+            }
+        }
+        slot
+    }
+
+    /// Position of each peak in its module's peak-member list.
+    pub fn peak_slot_of(&self) -> Vec<u32> {
+        let mut slot = vec![0u32; self.module_of_peak.len()];
+        for m in &self.peak_members {
+            for (s, &p) in m.iter().enumerate() {
+                slot[p as usize] = s as u32;
             }
         }
         slot

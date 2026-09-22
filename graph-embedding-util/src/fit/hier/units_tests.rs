@@ -146,6 +146,27 @@ fn the_untracked_constructor_is_the_base_track_spec() {
 }
 
 #[test]
+fn dual_count_unit_has_nonempty_rna_and_atac_vectors() {
+    // One pb level, one unit: RNA on genes 0,1; ATAC on peak 0.
+    let rna = vec![t(0, 0, 2.0), t(0, 1, 3.0)];
+    let atac = vec![t(0, 0, 5.0)];
+    let u = UnitTable::from_dual_pseudobulks(&[&rna], &[&atac], &[1], 2, 1);
+    assert_eq!(u.n_units(), 1);
+    assert_eq!(u.n_features, 2);
+    assert_eq!(u.n_peaks, 1);
+    assert!(!u.feats[0].is_empty());
+    assert!(!u.counts[0].is_empty());
+    assert!(!u.peak_feats[0].is_empty());
+    assert!(!u.peak_counts[0].is_empty());
+    assert_eq!(u.feats[0], vec![0, 1]);
+    assert_eq!(u.counts[0], vec![2.0, 3.0]);
+    assert_eq!(u.peak_feats[0], vec![0]);
+    assert_eq!(u.peak_counts[0], vec![5.0]);
+    assert_eq!(u.total[0], 5.0);
+    assert_eq!(u.peak_total[0], 5.0);
+}
+
+#[test]
 fn totals_and_weights_are_per_track() {
     // pb0: 1 + 3 on track 0, 1 on track 1; pb1: 5 + 4 on track 0, 9 on track 1;
     // pb2: 4 on track 0 and nothing on track 1.
