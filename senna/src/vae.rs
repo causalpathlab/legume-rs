@@ -323,13 +323,23 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     )?;
     // Coarse features for the encoder and every decoder. Both sides move
     // together here: this family has no feature-level context to keep back.
+    let cell_to_pb_finest: &[usize] = cell_to_pb_per_level
+        .as_deref()
+        .and_then(<[Vec<usize>]>::last)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            anyhow::anyhow!("feature coarsening needs the finest cell → pseudobulk membership")
+        })?;
     let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
         args.coarsening.cap(),
         args.init_from.as_deref(),
-        collapsed_levels.last().expect("at least one level"),
+        &crate::topic::common::FinestPseudobulks {
+            collapsed: collapsed_levels.last().expect("at least one level"),
+            cell_to_pb: cell_to_pb_finest,
+        },
         num_levels,
         n_features,
-        args.collapse.pb_refine.to_params(),
+        crate::topic::common::COARSENING_SEED,
         gene_axis.as_ref(),
     )?;
     let finest_coarsening = level_coarsenings.last().and_then(Option::as_ref);

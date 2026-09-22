@@ -122,6 +122,23 @@ pub struct BgeArgs {
     pub(crate) modules_per_unit: usize,
 
     #[arg(
+        long = "module-only-min-rows",
+        default_value_t = 100_000,
+        value_name = "N",
+        help = "Under --multiome, a modality with at least N features drops its residual (0 = off)",
+        long_help = "Under --multiome, a modality with at least N features is module-only.\n\
+                     Its modules are its own, partitioned once from the finest pseudobulks'\n\
+                     counts and fixed for the run, and a feature's row is its module's row,\n\
+                     with a bias equal to its share of the module's counts.\n\
+                     Phase 1 then skips the within-module softmax for that modality,\n\
+                     and phase 2 reads each such module as one row, exactly,\n\
+                     which is what keeps a very wide axis such as ATAC peaks affordable.\n\
+                     Features in a module share one embedding, so per-feature structure\n\
+                     inside a module is given up. 0 keeps every modality's residual."
+    )]
+    pub(crate) module_only_min_rows: usize,
+
+    #[arg(
         long = "skip-etm",
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",

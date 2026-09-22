@@ -408,13 +408,23 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &args.feature_name_kind,
         &gene_names,
     )?;
+    let cell_to_pb_finest: &[usize] = cell_to_pb_per_level
+        .as_deref()
+        .and_then(<[Vec<usize>]>::last)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            anyhow::anyhow!("feature coarsening needs the finest cell → pseudobulk membership")
+        })?;
     let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
         args.coarsening.cap(),
         args.init_from.as_deref(),
-        finest_collapsed,
+        &crate::topic::common::FinestPseudobulks {
+            collapsed: finest_collapsed,
+            cell_to_pb: cell_to_pb_finest,
+        },
         num_levels,
         n_features_full,
-        args.collapse.pb_refine.to_params(),
+        crate::topic::common::COARSENING_SEED,
         gene_axis.as_ref(),
     )?;
 

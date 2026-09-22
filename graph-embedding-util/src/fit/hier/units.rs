@@ -21,6 +21,8 @@ pub struct UnitTable {
     pub weight: Vec<f32>,
     pub level: Vec<u8>,
     pub source_index: Vec<u32>,
+    /// The pseudobulk units, which come first: `0..n_pb_units`; cells follow.
+    pub n_pb_units: usize,
 }
 
 impl UnitTable {
@@ -112,6 +114,7 @@ impl UnitTable {
                 source_index.push(p as u32);
             }
         }
+        let n_pb_units = feats.len();
         let cell_level = pb_blobs.len() as u8;
         for &(cell, f, c) in cells {
             let mut row: Vec<(u32, f32)> = crate::fit::projection::cell_edges(cell, f, c, fold)
@@ -130,8 +133,19 @@ impl UnitTable {
         let (n_u, n_t) = (feats.len(), tracks.n_tracks());
         let mut total = vec![0f32; n_u * n_t];
         for (u, (f, c)) in feats.iter().zip(&counts).enumerate() {
-            for (&row, &x) in f.iter().zip(c) {
-                total[u * n_t + tracks.track_of_row[row as usize] as usize] += x;
+            for (j, (&row, &x)) in f.iter().zip(c).enumerate() {
+                let Some(&t) = tracks.track_of_row.get(row as usize) else {
+                    panic!(
+                        "unit {u} ({} level {}, source {}) entry {j}/{}: feature row {row} \
+                         (bits as f32 {}) is past the {n_features}-row axis",
+                        if u < n_pb_units { "pseudobulk" } else { "cell" },
+                        level[u],
+                        source_index[u],
+                        f.len(),
+                        f32::from_bits(row),
+                    );
+                };
+                total[u * n_t + t as usize] += x;
             }
         }
         // `weight[u, t] = sqrt(total[u, t]) / mean_u sqrt(total[u, t])`, the mean
@@ -156,6 +170,7 @@ impl UnitTable {
             weight,
             level,
             source_index,
+            n_pb_units,
         }
     }
 }

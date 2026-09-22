@@ -128,9 +128,10 @@ pub struct HierParams {
     /// `[G, 1]` gradient mask on `r`, `0` on pinned genes. `None` when nothing
     /// is pinned, so the plain model pays no multiply.
     pub r_mask: Option<Tensor>,
-    /// Whether the module dictionary `μ` is pinned, as a whole, with the rows.
-    /// The biases `b_m` / `b_g` always train.
-    pub mu_frozen: bool,
+    /// Per module, whether `μ_m` is pinned: a module with a given member under a
+    /// pinning mode. Empty when nothing is pinned. The biases `b_m` / `b_g`
+    /// always train.
+    pub mu_pinned: Vec<bool>,
     /// Per gene, whether its row is pinned (see [`Self::preset`]). Empty when
     /// nothing is pinned.
     pub frozen_gene: Vec<bool>,
@@ -228,7 +229,7 @@ impl HierParams {
                 })
                 .collect::<CResult<_>>()?,
             r_mask: None,
-            mu_frozen: false,
+            mu_pinned: Vec::new(),
             frozen_gene: Vec::new(),
             frozen_rows: Vec::new(),
             lora: None,
@@ -241,13 +242,24 @@ impl HierParams {
     /// Set the listed genes' composed rows `μ_{m(g)} + r_g` to `preset.rows`.
     ///
     /// `μ` becomes the mean of the given rows in each module (a module with no
-    /// given member keeps its random `μ`, which its free members' residuals
-    /// absorb), and each given gene's residual is `r_g = row − μ_m`, so the
-    /// row composes back exactly. Under `Freeze` both `μ` and those residuals
-    /// are then pinned; under `Lora` they are pinned too and a low-rank
-    /// residual trains on top; under `Init` they train on from there. Free
-    /// genes keep their random residual either way; every bias keeps training.
-    pub fn preset(&mut self, frozen: &PresetGenes, module_of: &[u32]) -> anyhow::Result<()> {
+    /// given member keeps its random start), and each given gene's residual is
+    /// `r_g = row − μ_m`, so the row composes back exactly. Under `Freeze` the
+    /// `μ` of every module with a given member and those residuals are then
+    /// pinned; under `Lora` they are pinned too and a low-rank residual trains
+    /// on top; under `Init` they train on from there. A module with no given
+    /// member always trains. Free genes keep their random residual either way;
+    /// every bias keeps training.
+    ///
+    /// A **module-only** gene (`module_only[g]`; empty = none) carries no
+    /// residual, so its row IS its module's: its given row enters the module
+    /// mean, and a pinning mode holds that mean rather than the row itself.
+    pub fn preset(
+        &mut self,
+        frozen: &PresetGenes,
+        module_of: &[u32],
+        module_only: &[bool],
+    ) -> anyhow::Result<()> {
+        let is_module_only = |g: usize| module_only.get(g).copied().unwrap_or(false);
         let (h, n_genes, n_modules) = (self.h, module_of.len(), self.b_m.dims()[0]);
         frozen.mode.validate(h)?;
         anyhow::ensure!(
@@ -284,17 +296,31 @@ impl HierParams {
             let g = g as usize;
             let m = module_of[g] as usize;
             for k in 0..h {
-                r[g * h + k] = frozen.rows[i * h + k] - mu[m * h + k];
+                r[g * h + k] = if is_module_only(g) {
+                    0.0
+                } else {
+                    frozen.rows[i * h + k] - mu[m * h + k]
+                };
             }
         }
         self.mu
             .set(&Tensor::from_vec(mu, (n_modules, h), &self.dev)?)?;
         self.r.set(&Tensor::from_vec(r, (n_genes, h), &self.dev)?)?;
         if frozen.mode.pins() {
+            // Row-pinned genes: the given ones that carry a residual.
+            let row_pinned: Vec<u32> = frozen
+                .ids
+                .iter()
+                .copied()
+                .filter(|&g| !is_module_only(g as usize))
+                .collect();
             self.frozen_gene = vec![false; n_genes];
             self.frozen_rows = vec![0.0; n_genes * h];
             for (i, &g) in frozen.ids.iter().enumerate() {
                 let g = g as usize;
+                if is_module_only(g) {
+                    continue;
+                }
                 self.frozen_gene[g] = true;
                 self.frozen_rows[g * h..(g + 1) * h]
                     .copy_from_slice(&frozen.rows[i * h..(i + 1) * h]);
@@ -305,20 +331,22 @@ impl HierParams {
                 .map(|&pinned| if pinned { 0.0 } else { 1.0 })
                 .collect();
             self.r_mask = Some(Tensor::from_vec(keep, (n_genes, 1), &self.dev)?);
-            self.mu_frozen = true;
+            self.mu_pinned = count.iter().map(|&c| c > 0).collect();
             if let Some(spec) = frozen.mode.lora() {
                 let (rank, lr_ratio) = (spec.rank, spec.lr_ratio);
-                let all_modules: Vec<u32> = (0..n_modules as u32).collect();
+                let pinned_modules: Vec<u32> = (0..n_modules as u32)
+                    .filter(|&m| self.mu_pinned[m as usize])
+                    .collect();
                 self.lora = Some(HierLora {
                     module: PinnedLora::new(
                         n_modules,
                         h,
                         rank,
-                        &all_modules,
+                        &pinned_modules,
                         mix_seed(self.seed, 0x4c4f_524d),
                         &self.dev,
                     )?,
-                    gene: PinnedLora::new(n_genes, h, rank, &frozen.ids, self.seed, &self.dev)?,
+                    gene: PinnedLora::new(n_genes, h, rank, &row_pinned, self.seed, &self.dev)?,
                     lr_ratio,
                     ridge: spec.ridge,
                 });

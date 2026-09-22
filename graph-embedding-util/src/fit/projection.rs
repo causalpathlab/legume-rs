@@ -5,14 +5,15 @@
 //! ([`FrozenProjector`]) that `senna predict` uses.
 
 use super::batch_fold::BatchGeneFold;
-use crate::fit::config::TrackSpec;
 use legume_numeric::candle::candle_core::Device;
 
 mod block_sgd;
 mod cells;
+mod collapse;
 mod encoder;
 
 pub(crate) use cells::project_cells_phase2;
+pub use collapse::RowCollapse;
 pub use encoder::{CellEncoder, CellEncoders, TrackEncoder};
 pub(crate) use encoder::{DistillLevel, DistillSpec};
 
@@ -210,86 +211,6 @@ impl<'a> FrozenProjector<'a> {
         Ok(FrozenProjection {
             theta: out.theta,
             b_node: out.b_cell,
-        })
-    }
-
-    /// [`Self::project`] from a warm start: `init` is `[n_nodes × h]` indexed
-    /// like `nodes`' ids, and the solve is capped at the polish budget. What
-    /// `senna predict` runs after a run's encoder has placed a group, so a query
-    /// walks the same two steps the run's own cells did.
-    ///
-    /// **Single-track only.** This projector normalises over the whole frozen
-    /// feature axis as ONE Poisson partition with ONE intercept, which is the
-    /// right model for a plain gene axis and the wrong one for a multi-track one
-    /// (the training-side polish gives each track its own partition and
-    /// intercept — see [`block_sgd`]). A multi-track axis must go through
-    /// [`Self::polish_tracks`] instead.
-    pub fn polish(
-        &self,
-        nodes: &[(u32, &[u32], &[f32])],
-        init: &[f32],
-        bar: &indicatif::ProgressBar,
-    ) -> anyhow::Result<FrozenProjection> {
-        let input = self.phase2_input(nodes.len());
-        let pass = block_sgd::polish_prepared(&input, &self.dict, nodes, init, bar)?;
-        let out = block_sgd::finish(&input, nodes, pass);
-        Ok(FrozenProjection {
-            theta: out.theta,
-            b_node: out.b_cell,
-        })
-    }
-
-    /// [`Self::polish`], track-aware: the counterpart [`Self::polish`]'s own doc
-    /// names as the follow-up. A multi-track feature axis was FIT with one
-    /// Poisson partition and one intercept PER TRACK
-    /// ([`block_sgd::polish_cells`] dispatching to the per-track pass at
-    /// `!tracks.is_base()`, Task 4a); [`Self::polish`] would instead pool every
-    /// track's rows into ONE partition with ONE intercept, which is a different
-    /// objective from the one the cell's own training-time placement solved —
-    /// not merely a less precise answer to the same one. This entry point runs
-    /// the identical training-side pass on the query, so a query cell is placed
-    /// exactly the way the run's own cells were.
-    ///
-    /// Returns the shared latent `Θ` and the BASE track's (`track 0`)
-    /// intercept, the same shape [`FrozenProjection`] already has — a track
-    /// `t > 0`'s intercept is per-track as well as per-cell, and
-    /// `FrozenProjection::b_node` has room for one number per node, exactly
-    /// what the single-partition `polish` already reports. `tracks` decides
-    /// this for itself: a `TrackSpec::is_base` spec routes straight back to
-    /// the single-partition pass inside [`block_sgd::polish_cells`], so
-    /// calling this on a one-track axis is harmless, just an unnecessary
-    /// indirection — `senna bge` has no reason to.
-    ///
-    /// No batch fold: a held-out query has no membership in the training
-    /// run's own per-batch fold table, so this passes `None`, exactly as
-    /// [`Self::polish`] already does through [`block_sgd::polish_prepared`].
-    ///
-    /// Rebuilds its own per-track frozen design on every call, unlike
-    /// [`Self::polish`], which reuses `self.dict` (built once in [`Self::new`]).
-    /// That reuse is what a ONE-partition axis affords; a per-track design
-    /// would need `T` of them, cached per distinct `TrackSpec` — nothing here
-    /// has a reason to do that at predict-time query volumes, and
-    /// [`block_sgd::polish_cells`] already pays exactly this cost on the
-    /// training side, once per polish.
-    ///
-    /// Manages its own progress bar internally (the same training-side
-    /// entry point every phase-2 cell polish runs through), so — unlike
-    /// [`Self::project`] / [`Self::polish`] — `bar` is not threaded through a
-    /// shared query-wide bar; a caller streaming several groups sees one
-    /// bar per group rather than one continuous bar over the whole query.
-    /// A UX difference only: every number is unaffected.
-    pub fn polish_tracks(
-        &self,
-        nodes: &[(u32, &[u32], &[f32])],
-        init: &[f32],
-        tracks: &TrackSpec,
-        _bar: &indicatif::ProgressBar,
-    ) -> anyhow::Result<FrozenProjection> {
-        let input = self.phase2_input(nodes.len());
-        let pass = block_sgd::polish_cells(&input, nodes, None, init, tracks)?;
-        Ok(FrozenProjection {
-            theta: pass.latent,
-            b_node: pass.intercept,
         })
     }
 }

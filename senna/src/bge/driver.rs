@@ -57,6 +57,8 @@ pub(crate) struct EmbedKnobs<'a> {
     pub qc: &'a QcArgs,
     pub phase1_cells_per_pb: usize,
     pub modules_per_unit: usize,
+    /// See [`ge::FitConfig::module_only_min_rows`]; `0` off.
+    pub module_only_min_rows: usize,
     pub skip_etm: bool,
     pub num_topics: Option<usize>,
     pub epochs: usize,
@@ -215,6 +217,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             phase1_cells_per_pb: knobs.phase1_cells_per_pb,
             hier_units_per_step: knobs.batch_size.unwrap_or(256),
             hier_modules_per_unit: knobs.modules_per_unit,
+            module_only_min_rows: knobs.module_only_min_rows,
             feature_modules,
             tracks: plan
                 .tracks
@@ -646,7 +649,7 @@ fn write_pb_embeddings(
 /// used by both `senna bge` and `senna gem` unless `--feature-modules` overrides
 /// it — the engine has no module-free mode, so this is a shared policy
 /// constant rather than an opt-in default.
-const DEFAULT_FEATURE_MODULES: usize = 128;
+const DEFAULT_FEATURE_MODULES: usize = 1024;
 
 impl super::BgeArgs {
     /// `embedding_dim` is the width resolved against a given feature table.
@@ -660,6 +663,7 @@ impl super::BgeArgs {
             qc: &self.qc,
             phase1_cells_per_pb: self.phase1_cells_per_pb,
             modules_per_unit: self.modules_per_unit,
+            module_only_min_rows: self.module_only_min_rows,
             skip_etm: self.skip_etm,
             num_topics: self.num_topics,
             epochs: self.epochs,
@@ -695,6 +699,9 @@ impl crate::gem::args::GemArgs {
             qc: &self.qc,
             phase1_cells_per_pb: self.phase1_cells_per_pb,
             modules_per_unit: self.modules_per_unit,
+            // gem's axis is tracks of genes, not modalities: module-only needs
+            // a modality-tagged one-track axis, so it stays off.
+            module_only_min_rows: 0,
             skip_etm: self.skip_etm,
             num_topics: self.num_topics,
             epochs: self.epochs,

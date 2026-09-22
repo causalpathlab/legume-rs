@@ -1115,21 +1115,24 @@ impl RunManifest {
     }
 }
 
-/// Inverse of [`resolve`]: turn a freshly-written artifact path into the
-/// manifest-relative form for storage. Canonicalizes both sides so the
-/// strip works across symlinks and `./`-anchored relative paths, and
-/// silently keeps the absolute form when the artifact lives outside the
-/// manifest dir (e.g. `-o /tmp/foo` while the manifest is in `~/work/`).
+/// Inverse of [`resolve`]: turn a path given on the command line — relative
+/// to the working directory — into the manifest-relative form for storage.
+/// Canonicalizes both sides so the strip works across symlinks and
+/// `./`-anchored relative paths, and keeps the absolute form when the path
+/// lives outside the manifest dir (e.g. an input file, or `-o /tmp/foo` while
+/// the manifest is in `~/work/`).
 #[must_use]
 pub fn rel_to_manifest(manifest_dir: &Path, written_path: &str) -> String {
-    let abs = PathBuf::from(written_path);
-    let abs = if abs.is_absolute() {
-        abs
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&abs))
-            .unwrap_or(abs)
-    };
+    match std::env::current_dir() {
+        Ok(cwd) => rel_to_manifest_from(&cwd, manifest_dir, written_path),
+        Err(_) => written_path.to_string(),
+    }
+}
+
+/// [`rel_to_manifest`] with the working directory given explicitly.
+fn rel_to_manifest_from(cwd: &Path, manifest_dir: &Path, written_path: &str) -> String {
+    let abs = cwd.join(written_path);
+    let manifest_dir = cwd.join(manifest_dir);
     let manifest_abs = manifest_dir
         .canonicalize()
         .unwrap_or_else(|_| manifest_dir.to_path_buf());
@@ -1520,10 +1523,27 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
         |s| s.to_string_lossy().into_owned(),
     );
 
-    let mut m = RunManifest::new(desc.kind, desc.prefix);
-    m.data.input = desc.data_input.to_vec();
-    m.data.input_null = desc.data_input_null.to_vec();
-    m.data.batch = desc.data_batch.to_vec();
+    // Paths on the command line are relative to the working directory, but a
+    // reader of `data.*` resolves them against the manifest's directory, so
+    // they are stored manifest-relative. `prefix` is stored absolute: some
+    // readers resolve it and others use it as given, as a default `--out`.
+    let path = default_path(desc.prefix);
+    let prefix = std::path::absolute(desc.prefix).map_or_else(
+        |_| desc.prefix.to_string(),
+        |p| p.to_string_lossy().into_owned(),
+    );
+    let manifest_dir = Path::new(&path).parent().unwrap_or(Path::new(""));
+    let recorded = |paths: &[String]| -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| rel_to_manifest(manifest_dir, p))
+            .collect()
+    };
+
+    let mut m = RunManifest::new(desc.kind, &prefix);
+    m.data.input = recorded(desc.data_input);
+    m.data.input_null = recorded(desc.data_input_null);
+    m.data.batch = recorded(desc.data_batch);
     m.data.multiome = desc.data_multiome.clone();
     m.train_args = desc.train_args.clone();
 
@@ -1595,7 +1615,6 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
         .collect();
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 
-    let path = default_path(desc.prefix);
     m.save(Path::new(&path))
 }
 
@@ -1654,6 +1673,30 @@ mod tests {
             resolve(dir, "/abs/y.parquet"),
             PathBuf::from("/abs/y.parquet")
         );
+    }
+
+    /// An input path is typed relative to the shell's working directory, but
+    /// every reader resolves manifest paths against the manifest's directory.
+    /// Recording must bridge the two, whatever the working directory was.
+    #[test]
+    fn a_recorded_path_resolves_back_to_the_same_file_from_the_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let (cwd, run_dir) = (root.join("work"), root.join("work/out/run"));
+        std::fs::create_dir_all(cwd.join("data")).unwrap();
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(cwd.join("data/x.zarr.zip"), b"").unwrap();
+
+        // Outside the run directory: stored absolute.
+        let input = rel_to_manifest_from(&cwd, &run_dir, "data/x.zarr.zip");
+        assert_eq!(input, cwd.join("data/x.zarr.zip").to_string_lossy());
+        assert_eq!(resolve(&run_dir, &input), cwd.join("data/x.zarr.zip"));
+
+        // Inside it (a path that need not exist yet): stored relative to it,
+        // so the run directory can be moved.
+        let inside = rel_to_manifest_from(&cwd, &run_dir, "out/run/y.zarr.zip");
+        assert_eq!(inside, "y.zarr.zip");
+        assert_eq!(resolve(&run_dir, &inside), run_dir.join("y.zarr.zip"));
     }
 
     #[test]

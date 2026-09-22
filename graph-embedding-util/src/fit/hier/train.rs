@@ -7,7 +7,7 @@ use super::partition::{Partition, TrackSupport, UnitModules};
 use super::step::{apply, step_loss, Optimizers, StepCtx, StepPlan, StepStats};
 use super::units::UnitTable;
 use crate::progress::new_progress_bar;
-use legume_numeric::candle::candle_core::Device;
+use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::candle::convert::to_host;
 use legume_numeric::matrix::rand_util::mix_seed;
 use log::info;
@@ -42,6 +42,12 @@ pub struct HierConfig {
     pub offset_rank: usize,
     /// Where the tables live and the steps run.
     pub device: Device,
+    /// Per gene, `true` for a **module-only** feature: no residual, its row is
+    /// its module's row and its bias the closed-form share of the module's
+    /// counts, `ln(t_g / T_m)` over the pseudobulk units. The membership is the
+    /// warm start's and does not move. Every module must hold only one kind.
+    /// Empty when there are none.
+    pub module_only: Vec<bool>,
 }
 
 pub struct HierOutput {
@@ -54,6 +60,8 @@ pub struct HierOutput {
     /// Mean loss per unit over the last completed epoch; `NaN` when training
     /// stopped before any epoch completed (the tables are still finite).
     pub final_loss_per_unit: f64,
+    /// The module of every gene (the input labels).
+    pub labels: Vec<u32>,
 }
 
 /// One module picker per `(unit, TRACK)`, indexed `u * T + t` — the layout
@@ -159,12 +167,28 @@ pub fn train(
     // step. Inert on a one-track axis, where the base track covers every gene.
     let sup = TrackSupport::new(&units.tracks, &part);
     let (n_u, n_m, d) = (units.n_units(), part.n_modules(), units.tracks.n_genes());
+    let module_only = ModuleOnly::new(units, labels, cfg)?;
     let n_t = units.n_tracks();
     let n_features = units.n_features;
     let mut params =
         HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.offset_rank, cfg.seed, &cfg.device)?;
     if let Some(f) = preset {
-        params.preset(f, &part.module_of)?;
+        let mut is_module_only = vec![false; part.module_of.len()];
+        for &g in module_only.iter().flat_map(|mo| &mo.genes) {
+            is_module_only[g as usize] = true;
+        }
+        params.preset(f, &part.module_of, &is_module_only)?;
+        let n_mo = f
+            .ids
+            .iter()
+            .filter(|&&g| is_module_only[g as usize])
+            .count();
+        if n_mo > 0 && f.mode.pins() {
+            info!(
+                "Phase 1 (hier) — {n_mo} given module-only feature(s) carry no residual: \
+                 each module holds the mean of its members' given rows"
+            );
+        }
         info!(
             "Phase 1 (hier) — {} of {d} gene rows {}{}",
             f.ids.len(),
@@ -198,12 +222,26 @@ pub fn train(
             params.offset_lr_ratio
         );
     }
+    if let Some(mo) = &module_only {
+        mo.pin(&params)?;
+        info!(
+            "Phase 1 (hier) — {} module-only feature(s) in {} module(s): no residual, \
+             bias = share of the module's counts; {}",
+            mo.genes.len(),
+            mo.skip.iter().filter(|&&s| s).count(),
+            mo.summary(&um, &part),
+        );
+    }
+    let skip: Vec<bool> = module_only
+        .as_ref()
+        .map_or_else(Vec::new, |mo| mo.skip.clone());
     let mut opt = Optimizers::new(&params, cfg.lr)?;
     let ctx = StepCtx {
         units,
         um: &um,
         part: &part,
         sup: &sup,
+        skip_module: &skip,
     };
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
     let pickers = module_pickers(&um, n_m);
@@ -275,7 +313,136 @@ pub fn train(
         rho,
         b_feat,
         final_loss_per_unit: last_per_unit,
+        labels: labels.to_vec(),
     })
+}
+
+/// The module-only half of the partition: which modules skip the gene level,
+/// and each module-only feature's closed-form bias.
+struct ModuleOnly {
+    /// The module-only feature ids.
+    genes: Vec<u32>,
+    /// `ln(t_g / T_m)` per entry of `genes`, over the pseudobulk units.
+    bias: Vec<f32>,
+    /// Per module: module-only (no gene level).
+    skip: Vec<bool>,
+}
+
+/// Floor on a count total before its log, so an unseen feature gets a finite
+/// share instead of `ln 0`.
+const TOTAL_FLOOR: f32 = 1e-6;
+
+impl ModuleOnly {
+    /// `None` when [`HierConfig::module_only`] flags nothing. Refuses a module
+    /// that holds both kinds of feature, and a multi-track axis.
+    fn new(units: &UnitTable, labels: &[u32], cfg: &HierConfig) -> anyhow::Result<Option<Self>> {
+        let mo = &cfg.module_only;
+        if !mo.iter().any(|&b| b) {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            mo.len() == labels.len(),
+            "module-only flags for {} features, labels for {}",
+            mo.len(),
+            labels.len()
+        );
+        anyhow::ensure!(
+            units.n_tracks() == 1,
+            "module-only features need a one-track feature axis"
+        );
+        let mut kind: Vec<Option<bool>> = vec![None; cfg.n_modules];
+        for (g, (&m, &is_mo)) in labels.iter().zip(mo).enumerate() {
+            match kind[m as usize] {
+                None => kind[m as usize] = Some(is_mo),
+                Some(k) => anyhow::ensure!(
+                    k == is_mo,
+                    "module {m} mixes module-only and residual features (feature {g})"
+                ),
+            }
+        }
+        // `t_g` over the pseudobulk units, then `T_m` over each module's members.
+        let mut t = vec![0f32; labels.len()];
+        for u in 0..units.n_pb_units {
+            for (&g, &c) in units.feats[u].iter().zip(&units.counts[u]) {
+                t[g as usize] += c;
+            }
+        }
+        let mut module_total = vec![0f32; cfg.n_modules];
+        for (g, &m) in labels.iter().enumerate() {
+            if mo[g] {
+                module_total[m as usize] += t[g];
+            }
+        }
+        let genes: Vec<u32> = (0..labels.len() as u32)
+            .filter(|&g| mo[g as usize])
+            .collect();
+        let bias = genes
+            .iter()
+            .map(|&g| {
+                let m = labels[g as usize] as usize;
+                (t[g as usize].max(TOTAL_FLOOR) / module_total[m].max(TOTAL_FLOOR)).ln()
+            })
+            .collect();
+        Ok(Some(Self {
+            genes,
+            bias,
+            skip: kind.iter().map(|k| *k == Some(true)).collect(),
+        }))
+    }
+
+    /// Count mass and occupancy per kind of module, for the log: how much of
+    /// the units' counts the gene level can still see, and how the members
+    /// spread over the modules.
+    fn summary(&self, um: &UnitModules, part: &Partition) -> String {
+        let n_m = self.skip.len();
+        let (mut mass_mo, mut mass_res) = (0f64, 0f64);
+        for (i, &n) in um.n_um.iter().enumerate() {
+            if self.skip[i % n_m] {
+                mass_mo += f64::from(n);
+            } else {
+                mass_res += f64::from(n);
+            }
+        }
+        let occupancy = |mo: bool| {
+            let sizes: Vec<usize> = (0..n_m)
+                .filter(|&m| self.skip[m] == mo)
+                .map(|m| part.members[m].len())
+                .collect();
+            format!(
+                "{} of {} occupied, largest {}",
+                sizes.iter().filter(|&&s| s > 0).count(),
+                sizes.len(),
+                sizes.iter().max().copied().unwrap_or(0)
+            )
+        };
+        format!(
+            "count share residual {:.1}% / module-only {:.1}%; residual modules {}; \
+             module-only modules {}",
+            100.0 * mass_res / (mass_res + mass_mo).max(1.0),
+            100.0 * mass_mo / (mass_res + mass_mo).max(1.0),
+            occupancy(false),
+            occupancy(true)
+        )
+    }
+
+    /// Zero the module-only rows' residuals and set their biases. The gene
+    /// level never scores them, so neither table takes a gradient there.
+    fn pin(&self, params: &HierParams) -> anyhow::Result<()> {
+        let (h, dev) = (params.h, &params.dev);
+        let mut r = to_host(params.r.as_tensor())?;
+        for &g in &self.genes {
+            r[g as usize * h..(g as usize + 1) * h].fill(0.0);
+        }
+        let n_g = r.len() / h;
+        params.r.set(&Tensor::from_vec(r, (n_g, h), dev)?)?;
+        let mut b = to_host(params.b_g.as_tensor())?;
+        for (&g, &v) in self.genes.iter().zip(&self.bias) {
+            b[g as usize] = v;
+        }
+        let n_b = b.len();
+        params.b_g.set(&Tensor::from_vec(b, n_b, dev)?)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
