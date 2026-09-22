@@ -44,11 +44,43 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   that seeds it (AUROC ≈ 0.85 at 10 epochs, ≈ 0.89 at 100, vs 0.64–0.70 for Pearson).
   The link/refine stage is now the weak stage, not the embedding.
 
-* [ ] **fine-tune the links after the embed.** Today the trained gene / peak rows only
-  reach the output as side parquets; the refine re-runs the same Pearson / ABC on each
-  cluster's raw pb columns. Read the embedding in the link stage: gene–peak cosine (or a
-  unit-gated score over a cluster's pb rows) as the evidence, or folded into the Pearson
-  by product / rank average; re-measure on the sim above.
+* [ ] **fine-tune the links after the embed** (next up, 2026-09-22). Today the trained
+  gene / peak rows only reach the output as side parquets; the refine re-runs the same
+  Pearson / ABC on each cluster's raw pb columns, and on both the sim and real data that
+  score barely favors promoter-proximal peaks while the rows already rank causal peaks
+  well. The embedding makes the link a quadratic form: with `ρ_g`, `ρ_p` the frozen rows
+  and `Σ_S` the covariance of the cell latents `θ` over a cell set `S`,
+
+      cov_S(g, p)  = ρ_gᵀ Σ_S ρ_p
+      corr_S(g, p) = cov_S / sqrt(ρ_gᵀ Σ_S ρ_g · ρ_pᵀ Σ_S ρ_p)
+
+  is the same statistic as today (a correlation) on the model's denoised rates, costs
+  one H×H matrix per cell set plus a few dot products per cis pair, and needs no pb
+  columns. Three shapes, in order:
+  1. global link from the rows alone: cosine of `ρ_g`, `ρ_p` over the cis candidates
+     (already measured: AUROC 0.89 vs 0.70 for Pearson on the sim); drop-in for the
+     phase-1 link map, cell-type agnostic;
+  2. per-cluster latent correlation (recommended next): `Σ_k` over the cells of cluster
+     `k`, gated by activity so a link is reported where the peak is open in that cluster
+     (`exp(⟨ρ_p, θ̄_k⟩ + b_p)`), distance decay kept as the prior. Within-cluster removes
+     the between-lineage axis, which is the bystander-through-shared-state failure; what
+     remains is the within-state co-variation the sim plants as its private signal;
+  3. a gene–peak coupling term in phase 1 (linked pairs attracted against sampled cis
+     negatives); only after 2 shows what the rows can already do.
+  Plan: prototype 2 in R from the sim's parquets (gene / peak / cell embeddings +
+  ground truth exist for pve-cis 0.3 and 0.8), compare Pearson, row cosine, global latent
+  correlation, within-cluster latent correlation with the same top-k / AUROC; then a new
+  scorer in `link_map.rs` / `refine.rs` taking rows and a covariance instead of pb
+  matrices. Caveat: the sim has no bystander that co-varies through shared state, so 2
+  can only be shown not to lose on the easy case until that simulator knob exists.
+
+* [ ] **phase 2 by distilled encoders instead of the cold per-cell solve** (in flight
+  2026-09-22). The cold block SGD runs to its step cap on real data and took 12.5 of 16
+  min on the PBMC set; the per-axis encoder path (one trunk per axis distilled onto the
+  phase-1 pb tables, refined on the cells' likelihood summed over axes, no polish) is
+  implemented and being measured against the cold MAP on the same cells (cluster ARI,
+  kNN overlap, side-by-side UMAP). Whichever loses is deleted: one estimator. The same
+  rule applies to senna bge (encoder + polish is two solvers for one convex answer).
 
 * [ ] **gene–peak co-embedding term.** Genes and peaks share a space only through the
   unit table; no loss term touches a gene and a peak directly, the cis links only seed
