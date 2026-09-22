@@ -110,6 +110,7 @@ use crate::progress::new_progress_bar;
 use legume_numeric::candle::candle_core::Device;
 use log::info;
 
+mod axes;
 mod edges;
 mod pass;
 mod solve;
@@ -118,6 +119,7 @@ mod tracks;
 use edges::EdgeTable;
 use pass::{run_pass, PassSpec};
 
+pub use axes::{AxesProjector, AxisDict, CellGroup, GroupOut};
 pub(crate) use edges::block_cells;
 pub(crate) use pass::{DictSpec, PassDict, PassOut};
 

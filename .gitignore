@@ -70,3 +70,6 @@ target-cuda/
 # agent planning docs (session scratch, never tracked)
 docs/superpowers/
 docs/temp/
+
+# agent execution scratch (ledger, briefs, review packages)
+.superpowers/
