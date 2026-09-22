@@ -74,7 +74,10 @@ pub(super) fn build_pseudobulks(
             anchor_batches: config.anchor_batches.clone(),
             bulk_batches: config.bulk_batches.clone(),
             observe_panels: true,
-            keep_finest_stats: config.emit_finest_collapse,
+            // The feature partition reads the finest level's counts
+            // (`CollapsedOut::observed_counts`), and the pseudobulk
+            // reference serializes them; both need the sufficient statistics.
+            keep_finest_stats: true,
             pb_tree: None,
             strata: config.strata.clone(),
         },

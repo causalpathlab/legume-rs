@@ -4,7 +4,7 @@
 
 use super::block_sgd;
 use super::encoder::{self, CellEncoders, DistillSpec};
-use super::CellBatchFold;
+use super::{CellBatchFold, RowCollapse};
 use crate::fit::config::TrackSpec;
 use crate::loss::PerBatchStratifiedCellSampler;
 use crate::model::JointEmbedModel;
@@ -76,6 +76,10 @@ fn collect_sampler_cells(
 /// ([`encoder`]): the phase-1 pseudobulk tables are the targets, and every cell
 /// is encoded in one pass. `None` keeps the block SGD.
 ///
+/// `collapse`, when given, runs the encoder on the collapsed axis — one row per
+/// module-only module ([`super::collapse`]) — and hands back an encoder that
+/// folds full-axis cells itself. The gauge fold below stays on the full axis.
+///
 /// See [`Phase2Result`] for what comes back.
 #[allow(clippy::too_many_arguments)] // frozen dictionary + samplers + batch fold + distill spec
 pub(crate) fn project_cells_phase2(
@@ -88,6 +92,7 @@ pub(crate) fn project_cells_phase2(
     batch_fold: Option<CellBatchFold>,
     distill: Option<&DistillSpec<'_>>,
     tracks: &TrackSpec,
+    collapse: Option<&RowCollapse>,
 ) -> anyhow::Result<Phase2Result> {
     use anyhow::Context;
     use legume_numeric::candle::candle_core::Tensor;
@@ -130,7 +135,8 @@ pub(crate) fn project_cells_phase2(
     };
     let (out, cell_encoder) = match distill {
         Some(spec) => {
-            let (out, enc) = encoder::project_cells(&input, &cells, batch_fold, spec, tracks)?;
+            let (out, enc) =
+                encoder::project_cells(&input, &cells, batch_fold, spec, tracks, collapse)?;
             (out, Some(enc))
         }
         None => {
@@ -141,6 +147,10 @@ pub(crate) fn project_cells_phase2(
                 tracks.is_base(),
                 "phase 2: the cold block SGD is single-partition — a multi-track \
                  feature axis needs the distilled encoder path"
+            );
+            anyhow::ensure!(
+                collapse.is_none(),
+                "phase 2: a collapsed feature axis needs the distilled encoder path"
             );
             (block_sgd::project_cells(&input, &cells, batch_fold)?, None)
         }

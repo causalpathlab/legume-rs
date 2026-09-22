@@ -302,6 +302,7 @@ fn total(
         um,
         part,
         sup,
+        skip_module: &[],
     };
     let (s, loss) = step_loss(p, &ctx, plan, l2, 0.0).unwrap();
     (s.loss_module + s.loss_gene + s.loss_ridge, loss)
@@ -369,6 +370,7 @@ fn the_step_loss_matches_the_f64_reference_with_tracks_and_ridge() {
             um: &um,
             part: &part,
             sup: &sup,
+            skip_module: &[],
         },
         &plan,
         OFFSET_L2,
@@ -449,6 +451,7 @@ fn pair_weight_scales_the_gene_level_term() {
             um: &um,
             part: &part,
             sup: &sup,
+            skip_module: &[],
         },
         &one,
         0.0,
@@ -462,6 +465,7 @@ fn pair_weight_scales_the_gene_level_term() {
             um: &um,
             part: &part,
             sup: &sup,
+            skip_module: &[],
         },
         &half,
         0.0,
@@ -547,7 +551,8 @@ fn weight_decay_shrinks_touched_rows_only_and_never_the_offsets() {
     }
 }
 
-/// A pinned row takes no step, its bias does, and the dictionary stays put.
+/// A pinned row takes no step, its bias does, and only the modules holding a
+/// pinned row stay put.
 #[test]
 fn pinned_rows_hold_while_their_biases_train() {
     let (units, part, um, sup, mut p) = fixture();
@@ -556,7 +561,7 @@ fn pinned_rows_hold_while_their_biases_train() {
         rows: vec![0.5, -0.5, 0.25, 0.75],
         mode: PresetMode::Freeze,
     };
-    p.preset(&given, &part.module_of).unwrap();
+    p.preset(&given, &part.module_of, &[]).unwrap();
     let plan = plan_all();
     let mut opt = Optimizers::new(&p, 0.2).unwrap();
     let r0 = to_host(p.r.as_tensor()).unwrap();
@@ -577,11 +582,17 @@ fn pinned_rows_hold_while_their_biases_train() {
         );
     }
     assert_ne!(&r1[2 * h..3 * h], &r0[2 * h..3 * h], "a free row trains");
-    assert_eq!(
-        to_host(p.mu.as_tensor()).unwrap(),
-        mu0,
-        "μ is pinned with the rows"
-    );
+    // μ is held exactly where a given row sits, and trains where none does.
+    let mu1 = to_host(p.mu.as_tensor()).unwrap();
+    for (m, &pinned) in p.mu_pinned.iter().enumerate() {
+        let (was, is) = (&mu0[m * h..(m + 1) * h], &mu1[m * h..(m + 1) * h]);
+        if pinned {
+            assert_eq!(is, was, "module {m} holds a given row and moved");
+        } else {
+            assert_ne!(is, was, "module {m} has no given row and never trained");
+        }
+    }
+    assert!(p.mu_pinned.iter().any(|&x| x) && p.mu_pinned.iter().any(|&x| !x));
     let b1 = to_host(p.b_g.as_tensor()).unwrap();
     assert!(
         b1[0] != b0[0] || b1[3] != b0[3],
@@ -603,7 +614,7 @@ fn autograd_matches_finite_differences_on_the_lora_factors() {
             ridge: 0.0,
         }),
     };
-    p.preset(&given, &part.module_of).unwrap();
+    p.preset(&given, &part.module_of, &[]).unwrap();
     let l = p.lora.as_ref().unwrap();
     for v in [&l.module.v, &l.gene.v] {
         v.set(&Tensor::from_vec(vec![0.2f32, -0.4], (1, 2), &Device::Cpu).unwrap())
@@ -661,6 +672,7 @@ fn the_gene_offset_stays_low_rank_and_a_pinned_offset_base_holds() {
             mode: PresetMode::Freeze,
         },
         &part.module_of,
+        &[],
     )
     .unwrap();
     q.preset_offsets(

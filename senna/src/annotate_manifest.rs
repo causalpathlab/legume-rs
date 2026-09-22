@@ -24,9 +24,7 @@ use crate::embed_common::Mat;
 use crate::marker_embedding::load_marker_feature_embedding_from;
 use crate::marker_support::build_annotation_matrix;
 use crate::run_manifest::{self, CellSpace, RunManifest};
-use crate::senna_input::{
-    read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
-};
+use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 
 use anyhow::{anyhow, Context, Result};
 use legume_numeric::matrix::dmatrix_io::DMatrix;
@@ -190,6 +188,30 @@ fn resolve(manifest_dir: &Path, rel: &str) -> String {
         .into_owned()
 }
 
+/// How to re-open the raw counts a run trained on: its `data.input` and
+/// `data.batch`, resolved against the manifest's directory, under the
+/// multiome layout it recorded — a multiome run's files are modalities of one
+/// cell set, glued by barcode and namespaced as training did. No cell QC:
+/// annotation maps onto the run's existing cells.
+fn raw_counts_load(
+    manifest: &RunManifest,
+    manifest_dir: &Path,
+    preload: bool,
+) -> Result<ReadSharedRowsArgs> {
+    let to_box = |s: &String| resolve(manifest_dir, s).into_boxed_str();
+    let data_files: Vec<Box<str>> = manifest.data.input.iter().map(to_box).collect();
+    let batch_files =
+        (!manifest.data.batch.is_empty()).then(|| manifest.data.batch.iter().map(to_box).collect());
+    let layout =
+        crate::multiome_layout::recorded_layout(manifest.data.multiome.as_ref(), data_files.len())?;
+    layout.apply(ReadSharedRowsArgs {
+        data_files,
+        batch_files,
+        preload,
+        ..Default::default()
+    })
+}
+
 /// Re-open the raw counts, resolve the clustering, parse the marker TSV, and
 /// aggregate the NB-Fisher-weighted cluster (and, for the marker path,
 /// per-batch) expression the enrichment pass scores.
@@ -205,43 +227,14 @@ fn load_enrichment_inputs(
         "manifest.data.input is empty; cannot re-open raw counts for cluster aggregation"
     );
 
-    let data_files: Vec<Box<str>> = manifest
-        .data
-        .input
-        .iter()
-        .map(|s| resolve(&manifest_dir, s).into_boxed_str())
-        .collect();
-    let batch_files: Option<Vec<Box<str>>> = if manifest.data.batch.is_empty() {
-        None
-    } else {
-        Some(
-            manifest
-                .data
-                .batch
-                .iter()
-                .map(|s| resolve(&manifest_dir, s).into_boxed_str())
-                .collect(),
-        )
-    };
-
-    info!("Re-opening raw counts: {} file(s)", data_files.len());
-    let stack = read_data_on_shared_columns(ReadSharedColumnsArgs {
-        data_files,
-        batch_files,
-        num_types: 1,
-        preload: args.preload_data,
-        // Annotation maps onto an existing cell set — never drop cells.
-        qc: None,
-        qc_block_size: None,
-        qc_report_out: None,
-    })?;
-    anyhow::ensure!(
-        stack.data_stack.stack.len() == 1,
-        "annotate: expected a single data stack, got {}",
-        stack.data_stack.stack.len()
-    );
-
-    let data_vec = &stack.data_stack.stack[0];
+    let load = raw_counts_load(&manifest, &manifest_dir, args.preload_data)?;
+    info!("Re-opening raw counts: {} file(s)", load.data_files.len());
+    let SparseDataWithBatch {
+        data: data_vec,
+        batch,
+        ..
+    } = read_data_on_shared_rows(load)?;
+    let data_vec = &data_vec;
     let n_cells = data_vec.num_columns();
     let n_genes = data_vec.num_rows();
     let cell_names = data_vec.column_names()?;
@@ -267,7 +260,7 @@ fn load_enrichment_inputs(
     );
 
     // Build per-cell batch ids (u32) for permutation null.
-    let (batch_labels, n_batches) = build_batch_labels(&stack, n_cells)?;
+    let (batch_labels, n_batches) = build_batch_labels(batch, n_cells)?;
     info!("Batches: {n_batches}");
 
     // Markers aligned to data row order. Optional: GO/GMT ontology mode supplies
@@ -580,11 +573,7 @@ where
 }
 
 /// Build per-cell batch ids as compact u32 indices in [0, `n_batches`).
-fn build_batch_labels(stack: &SparseStackWithBatch, n_cells: usize) -> Result<(Vec<u32>, usize)> {
-    let mut labels: Vec<Box<str>> = Vec::with_capacity(n_cells);
-    for v in &stack.batch_stack {
-        labels.extend(v.iter().cloned());
-    }
+fn build_batch_labels(labels: Vec<Box<str>>, n_cells: usize) -> Result<(Vec<u32>, usize)> {
     if labels.is_empty() {
         return Ok((vec![0u32; n_cells], 1));
     }
@@ -608,3 +597,6 @@ fn build_batch_labels(stack: &SparseStackWithBatch, n_cells: usize) -> Result<(V
     }
     Ok((out, next_id as usize))
 }
+
+#[cfg(test)]
+mod tests;

@@ -157,39 +157,28 @@ pub(crate) fn expand_delta_for_block(
     Ok(delta_bd.index_select(&indices, 0)?)
 }
 
-/// Build per-level feature coarsenings via the multilevel pipeline:
-/// shared KNN + bottom-up union-find init + top-down DC-Poisson refinement.
-/// Used by every senna fit pipeline that exposes `--max-coarse-features`.
-/// Defaults: `knn_k = 16`, `feature_weighting = None`.
-pub fn coarsen_features_multilevel(
-    sketch_ds: &Mat,
-    level_targets: &[usize],
-    dc_poisson: data_beans::alg::dc_poisson::RefineParams,
-) -> anyhow::Result<Vec<FeatureCoarsening>> {
-    let knn = FeatureKnnContext::from_sketch(sketch_ds, 16)?;
-    let init = compute_multilevel_feature_coarsening(sketch_ds, level_targets, &knn)?;
-    let params = MultilevelRefineParams {
-        dc_poisson: data_beans::alg::dc_poisson::RefineParams {
-            feature_weighting: data_beans::alg::dc_poisson::FeatureWeighting::None,
-            ..dc_poisson
-        },
-    };
-    let refined = refine_multilevel_feature_coarsening(sketch_ds, init, &knn, &params)?;
-    Ok(refined.levels)
+/// Seed of the feature coarsening's k-means for fits without a `--seed`.
+pub(crate) const COARSENING_SEED: u64 = 42;
+
+/// The finest collapse and the cell → pseudobulk membership that sizes its
+/// pseudobulks: what the feature coarsening reads its counts from.
+pub(crate) struct FinestPseudobulks<'a> {
+    pub collapsed: &'a CollapsedOut,
+    pub cell_to_pb: &'a [usize],
 }
 
 /// The per-level feature coarsenings of a fit: inherited verbatim from an
 /// `--init-from` parent (its weights are keyed to the parent's grouping),
-/// otherwise built from the finest pseudobulk profiles when `max_coarse_features`
-/// caps the feature axis, with log-spaced widths coarsest first; `None` per
-/// level when neither applies.
+/// otherwise [`coarsen_features`] of the finest
+/// pseudobulk counts when `max_coarse_features` caps the feature axis, with
+/// log-spaced widths coarsest first; `None` per level when neither applies.
 pub(crate) fn resolve_level_coarsenings(
     cap: Option<std::num::NonZeroUsize>,
     init_from: Option<&str>,
-    finest_collapsed: &CollapsedOut,
+    finest: &FinestPseudobulks<'_>,
     num_levels: usize,
     n_features_full: usize,
-    dc_params: data_beans::alg::dc_poisson::RefineParams,
+    seed: u64,
     gene_axis: Option<&crate::topic::eval::GeneRemap>,
 ) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
     if let Some(parent) = init_from {
@@ -202,7 +191,7 @@ pub(crate) fn resolve_level_coarsenings(
             num_levels,
             n_features_full,
             gene_axis,
-            finest_collapsed.mu_observed.posterior_mean(),
+            finest.collapsed.mu_observed.posterior_mean(),
         )?;
         let inherited = levels
             .last()
@@ -224,7 +213,6 @@ pub(crate) fn resolve_level_coarsenings(
     else {
         return Ok(vec![None; num_levels]);
     };
-    let sketch_ds = finest_collapsed.mu_observed.posterior_mean();
     let finest_target = cap;
     let min_target = (finest_target / num_levels).max(50);
     let level_targets: Vec<usize> = (0..num_levels)
@@ -240,12 +228,11 @@ pub(crate) fn resolve_level_coarsenings(
             target.clamp(min_target, finest_target)
         })
         .collect();
-    Ok(
-        coarsen_features_multilevel(sketch_ds, &level_targets, dc_params)?
-            .into_iter()
-            .map(Some)
-            .collect(),
-    )
+    let (counts, sizes) = finest.collapsed.observed_counts(finest.cell_to_pb);
+    Ok(coarsen_features(&counts, &sizes, &level_targets, seed)?
+        .into_iter()
+        .map(Some)
+        .collect())
 }
 
 /// Load the parent's per-level feature coarsenings for a `--init-from` run.
@@ -837,7 +824,9 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             .then(|| vec![senna::pb_reference::REFERENCE_BATCH.into()]),
         bulk_batches: args.mixture_batches.clone(),
         observe_panels: args.observe_panels,
-        keep_finest_stats: false,
+        // The feature coarsening reads the finest level's counts
+        // (`CollapsedOut::observed_counts`).
+        keep_finest_stats: true,
         pb_tree: args.pb_tree.clone(),
         strata: None,
     };

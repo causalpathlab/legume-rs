@@ -421,6 +421,44 @@ fn masked_topic_anchors_rho_with_a_low_rank_residual_and_folds_it_before_saving(
     }
 }
 
+/// The LoRA settings are checked against the width the table fixes, as on every
+/// other engine: a residual as wide as the table is no low-rank residual.
+#[test]
+fn a_lora_rank_as_wide_as_the_table_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = planted_zarr(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let common = [
+        "-t",
+        "3",
+        "-i",
+        "1",
+        "--gene-modules",
+        "0",
+        "--minibatch-size",
+        "50",
+    ];
+    let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "4"];
+    argv.extend_from_slice(&common);
+    fit_masked_topic_model(&parse_masked(&argv)).unwrap();
+    let mut argv = vec![
+        data.as_str(),
+        "-o",
+        &second,
+        "--embedding-dim",
+        "auto",
+        "--lora-feature-embedding",
+        &first,
+        "--lora-rank",
+        "4",
+    ];
+    argv.extend_from_slice(&common);
+    let err = fit_masked_topic_model(&parse_masked(&argv))
+        .expect_err("rank 4 on a width-4 table must be refused");
+    assert!(err.to_string().contains("rank"), "{err}");
+}
+
 /// A pinned table wider than the data: its unmatched rows come out after the
 /// data's genes, unchanged, with a types table over every row; the model's
 /// own per-gene tables stay on the data's axis.
