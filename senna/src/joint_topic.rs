@@ -293,7 +293,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .first()
         .ok_or_else(|| anyhow::anyhow!("the collapse returned no pseudobulk membership"))?;
     let coarsen_one = |collapsed: &CollapsedOut| -> anyhow::Result<FeatureCoarsening> {
-        let (counts, sizes) = collapsed.observed_counts(cell_to_pb_finest);
+        let (counts, sizes) = collapsed.observed_counts(cell_to_pb_finest)?;
         let targets = [cap.map_or(0, std::num::NonZeroUsize::get)];
         let mut levels = coarsen_features(&counts, &sizes, &targets, COARSENING_SEED)?;
         Ok(levels.remove(0))
