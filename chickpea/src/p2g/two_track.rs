@@ -8,7 +8,7 @@
 //! ridge-shrunk low-rank offset, and both are scored against the same
 //! pseudobulk embeddings.
 
-use super::cis::{build_cis_pairs, AbcKernel};
+use super::cis::{build_cis_pairs, AbcKernel, CisPairs};
 use super::gene_track::{write_gene_track, PeakToGenes};
 use super::tracks::{gene_tracks, ATAC_TAG, RNA_TAG};
 use crate::common::*;
@@ -81,6 +81,16 @@ pub struct TwoTrackEmbedding {
     /// `[cells × H]`.
     pub cell_rows: nalgebra::DMatrix<f32>,
     pub barcodes: Vec<Box<str>>,
+    /// `[finest pseudobulks × H]`, in the cells' frame.
+    pub pb_rows: nalgebra::DMatrix<f32>,
+    /// Finest pseudobulk of every cell, aligned with `barcodes`.
+    pub cell_to_pb: Vec<usize>,
+    /// The cis pairs over the RNA file's genes and the ATAC file's peaks.
+    pub pairs: CisPairs,
+    /// Gene names in RNA-file order (the order of `pairs`' genes).
+    pub rna_genes: Vec<Box<str>>,
+    /// Peak names in ATAC-file order (the ids in `pairs.peak`).
+    pub peak_names: Vec<Box<str>>,
 }
 
 pub fn embed_two_track(
@@ -99,7 +109,8 @@ pub fn embed_two_track(
         gene_names.len()
     );
     let atac = open_sparse_matrix_by_path(inp.atac_file)?;
-    let peaks = parse_peak_coordinates(&atac.row_names()?);
+    let peak_names = atac.row_names()?;
+    let peaks = parse_peak_coordinates(&peak_names);
     let pairs = build_cis_pairs(inp.gene_positions, &peaks, inp.kernel);
     info!(
         "Cis pairs: {} genes placed of {}, {} pairs; {} of {} peaks reach no gene \
@@ -144,7 +155,7 @@ pub fn embed_two_track(
         embedding_dim: h,
         anchor_batches: None,
         bulk_batches: None,
-        emit_finest_collapse: false,
+        emit_finest_collapse: true,
         num_levels: cfg.num_levels,
         sort_dim: cfg.sort_dim,
         knn_pb_samples: 10,
@@ -214,6 +225,21 @@ pub fn embed_two_track(
         atac_gene[g] = Some(k);
     }
     let cell_rows = nalgebra::DMatrix::<f32>::from_tensor(&out.model.e_cell)?;
+    let pb_rows = out
+        .pb_embeddings
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("the fit returned no pseudobulk embeddings"))?
+        .e_pb
+        .clone();
+    let (_, cell_to_pb) = out
+        .finest_collapse
+        .ok_or_else(|| anyhow::anyhow!("the fit returned no finest collapse"))?;
+    anyhow::ensure!(
+        cell_to_pb.len() == cell_rows.nrows(),
+        "{} pseudobulk memberships for {} cells",
+        cell_to_pb.len(),
+        cell_rows.nrows()
+    );
 
     Ok(TwoTrackEmbedding {
         genes,
@@ -222,5 +248,10 @@ pub fn embed_two_track(
         atac_gene,
         cell_rows,
         barcodes: unified.barcodes.clone(),
+        pb_rows,
+        cell_to_pb,
+        pairs,
+        rna_genes: gene_names,
+        peak_names,
     })
 }
