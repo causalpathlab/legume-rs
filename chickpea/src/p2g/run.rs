@@ -1,524 +1,219 @@
-//! `peak-to-gene` CLI args and orchestrator.
+//! `peak-to-gene` CLI arguments and the run.
 
 use crate::common::*;
-use crate::p2g::embed::{build_atac_embedding, cis_link_stats, project_gene, pve_adjust};
-use crate::p2g::finemap::{finemap_gene, FinemapParams};
-use crate::p2g::input::{load_gene_coords_tsv, load_paired_data};
-use crate::p2g::knockoff::{knockoff_threshold, knockoff_w, KnockoffParams};
-use crate::p2g::output::{write_bed, LinkRecord};
-use crate::p2g::tmle::{centered_log1p, cis_link_stats_tmle, LocoConfounders, ModalityBlock};
-use data_beans::alg::collapse_data::MultilevelParams;
-use data_beans::alg::refine_multilevel::RefineParams;
-use genomic_data::coordinates::{find_cis_peaks, load_gene_tss, parse_peak_coordinates};
-use rayon::prelude::*;
+use crate::p2g::attention::AttentionConfig;
+use crate::p2g::cis::AbcKernel;
+use crate::p2g::input::load_gene_coords_tsv;
+use crate::p2g::two_track::{TwoTrackConfig, TwoTrackInput};
+use crate::p2g::workflow::{run_links, LinkConfig};
+use data_beans::sparse_io::open_sparse_matrix_by_path;
+use genomic_data::coordinates::load_gene_tss;
+use rustc_hash::FxHashSet;
 
 #[derive(Args, Debug)]
+#[command(group = clap::ArgGroup::new("positions")
+    .required(true)
+    .args(["gene_coords", "gff_file"]))]
 pub struct PeakToGeneArgs {
     /* Input */
-    #[arg(
-        long,
-        required = true,
-        value_delimiter = ',',
-        help = "RNA sparse matrices (zarr/h5), comma-separated"
-    )]
-    rna_files: Vec<Box<str>>,
+    #[arg(long, help = "RNA gene counts (zarr/h5)")]
+    rna: Box<str>,
 
-    #[arg(
-        long,
-        required = true,
-        value_delimiter = ',',
-        help = "ATAC sparse matrices (zarr/h5), comma-separated"
-    )]
-    atac_files: Vec<Box<str>>,
+    #[arg(long, help = "ATAC peak counts (zarr/h5) for the same barcodes")]
+    atac: Box<str>,
 
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = "Batch label files, one per data file in RNA-then-ATAC order"
-    )]
-    batch_files: Option<Vec<Box<str>>>,
+    #[arg(long, help = "Batch labels, one per barcode")]
+    batch: Option<Box<str>>,
 
-    /// Shared cell QC (on by default; `--no-qc` to disable). MAD outliers +
-    /// near-empty floor, with optional `--qc-auto-cutoff` trough cell calling
-    /// (`--qc-histogram` to show the nnz distribution). Dropped cells are
-    /// removed from BOTH modalities up front, before projection / collapse.
+    /// Shared cell QC, driven by the RNA counts (on by default; `--no-qc` to
+    /// disable). Failed cells still inform the embedding, but are left out of
+    /// clustering, accessibility rates and every cell table.
     #[command(flatten)]
     qc: data_beans::qc_lib::QcArgs,
 
-    /* Cis enumeration */
+    /* Gene positions (one required) */
+    #[arg(long, help = "Gene TSS table: gene, chr, tss, with a header")]
+    gene_coords: Option<Box<str>>,
+
+    #[arg(long, help = "GFF/GTF annotation for gene TSS")]
+    gff_file: Option<Box<str>>,
+
+    /* Cis candidates and the ABC contact prior */
     #[arg(
         long,
-        default_value_t = 500000,
-        help = "Cis-window in bp around each gene TSS (peak midpoint distance)"
+        default_value_t = 500_000,
+        help = "Max peak-midpoint distance (bp) to a gene's TSS"
     )]
     cis_window: i64,
 
     #[arg(
         long,
-        help = "Gene coordinates TSV (gene<TAB>chr<TAB>tss).\n\
-                From sim-link gene_coords.tsv.gz"
-    )]
-    gene_coords: Option<Box<str>>,
-
-    #[arg(
-        long,
-        help = "GFF/GTF annotation for gene TSS. Alternative to --gene-coords"
-    )]
-    gff_file: Option<Box<str>>,
-
-    #[arg(
-        long,
         default_value_t = 200,
-        help = "Max cis-candidate peaks per gene (nearest by distance)"
+        help = "Max candidate peaks per gene, nearest first"
     )]
     max_cis: usize,
 
-    /* Pseudobulk / collapse */
     #[arg(
         long,
-        default_value_t = 64,
-        help = "Random projection dimension for cell grouping"
+        default_value_t = 1.0,
+        help = "Initial contact exponent γ in (d + c)^-γ"
     )]
-    proj_dim: usize,
+    contact_gamma: f32,
 
     #[arg(
         long,
-        default_value_t = 14,
-        help = "Binary sort dimension. Yields ~2^sort_dim pseudobulk samples"
+        default_value_t = 5000.0,
+        help = "Initial contact pseudocount c (bp)"
     )]
-    sort_dim: usize,
+    contact_pseudocount: f32,
 
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Use batch-adjusted pseudobulk (mu_adjusted) when available"
-    )]
-    use_adjusted: bool,
-
-    #[arg(
-        long,
-        default_value_t = 1,
-        help = "Hierarchical refinement levels;\n\
-                refined finest level is used (1 = single level)"
-    )]
-    num_levels: usize,
-
-    /* Embedding */
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "ATAC embedding rank d (rSVD of standardized log1p ATAC pseudobulk)"
-    )]
+    /* Two-track gene embedding */
+    #[arg(long, default_value_t = 128, help = "Embedding dimension")]
     embedding_dim: usize,
 
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable PVE (winner's-curse) z-score shrinkage"
-    )]
-    no_pve_adjust: bool,
+    #[arg(long, default_value_t = 1000, help = "Embedding epochs")]
+    epochs: usize,
 
-    /* TMLE deconfounding (LOCO topic adjustment) */
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Deconfound peak→gene z by LOCO topic adjustment (residual-on-residual DML/TMLE)"
-    )]
-    tmle: bool,
+    #[arg(long, default_value_t = 3, help = "Pseudobulk levels")]
+    num_levels: usize,
 
-    #[arg(
-        long,
-        default_value_t = 20,
-        help = "Number of off-chromosome topic confounder factors m for --tmle"
-    )]
-    tmle_rank: usize,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Use an ATAC-only --tmle confounder",
-        long_help = "Use an ATAC-only --tmle confounder.\n\
-                     The default is a joint RNA+ATAC co-embedding. ATAC-only tightens FDP,\n\
-                     and lowers power."
-    )]
-    tmle_atac_only: bool,
-
-    /* Fine-mapping (SuSiE-RSS) */
     #[arg(
         long,
         default_value_t = 10,
-        help = "Number of single-effect components L (max causal peaks per gene)"
+        help = "Binary sort dimension; about 2^sort_dim finest pseudobulks"
     )]
-    num_components: usize,
+    sort_dim: usize,
+
+    #[arg(long, default_value_t = 50, help = "Random projection dimension")]
+    proj_dim: usize,
+
+    #[arg(long, default_value_t = 128, help = "Gene modules for the softmax")]
+    feature_modules: usize,
 
     #[arg(
         long,
-        default_value_t = 5.0,
-        help = "SuSiE prior effect-size variance (z-score scale)"
+        default_value_t = 16,
+        help = "Cells per finest pseudobulk drawn into training"
     )]
-    prior_var: f64,
-
-    /* Knockoff FDR (optional) */
-    #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "Target FDR for knockoff-selected links (0 = off; PIPs only)"
-    )]
-    fdr: f64,
+    phase1_cells_per_pb: usize,
 
     #[arg(
         long,
-        default_value_t = 0.05,
-        help = "Knockoff LD ridge λ in R_λ = (1-λ)R + λI"
+        default_value_t = 16,
+        help = "Rank of the peak-aggregated track's gene offset"
     )]
-    ko_ridge: f64,
+    offset_rank: usize,
 
     #[arg(
         long,
-        value_enum,
-        default_value = "equi",
-        help = "Knockoff diagonal s: equi (default), mvr, or me",
-        long_help = "Knockoff diagonal s method. equi is equicorrelated, and the default.\n\
-                     mvr is min-variance reconstructability. me is max entropy.\n\
-                     \n\
-                     For dense cis sets, reduce --max-cis or raise --ko-ridge.\n\
-                     The s-method does not rescue a rank-deficient LD matrix."
+        default_value_t = 1.0,
+        help = "Ridge pulling a gene's ATAC row toward its RNA row"
     )]
-    ko_s: KoSMethod,
+    offset_l2: f32,
 
-    #[arg(long, default_value_t = 42, help = "Random seed for knockoff sampling")]
+    /* Localized attention */
+    #[arg(long, default_value_t = 16, help = "Rank of the attention content map")]
+    attention_rank: usize,
+
+    #[arg(long, default_value_t = 100, help = "Attention epochs")]
+    attention_epochs: usize,
+
+    #[arg(long, default_value_t = 0.01, help = "Attention learning rate")]
+    attention_lr: f64,
+
+    /* Clusters, seed, output */
+    #[arg(
+        long,
+        help = "Target number of cell clusters (default: Leiden decides)"
+    )]
+    n_clusters: Option<usize>,
+
+    #[arg(long, default_value_t = 42, help = "Random seed")]
     seed: u64,
 
-    /* Output */
-    #[arg(
-        long,
-        default_value_t = 0.0,
-        help = "PIP threshold for the summary log line (all links are written)"
-    )]
-    pip_threshold: f32,
-
-    #[arg(
-        long,
-        short,
-        required = true,
-        help = "Output prefix (produces {out}.results.bed.gz)"
-    )]
+    #[arg(long, short, help = "Output prefix for {out}.*.parquet")]
     out: Box<str>,
-}
-
-/// CLI surface for [`legume_numeric::matrix::knockoff::KnockoffS`].
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum KoSMethod {
-    Equi,
-    Mvr,
-    Me,
-}
-
-impl From<KoSMethod> for legume_numeric::matrix::knockoff::KnockoffS {
-    fn from(m: KoSMethod) -> Self {
-        match m {
-            KoSMethod::Equi => Self::Equicorrelated,
-            KoSMethod::Mvr => Self::Mvr,
-            KoSMethod::Me => Self::Me,
-        }
-    }
 }
 
 pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
-    /* 1. Load paired RNA + ATAC */
-    let mut paired = load_paired_data(
-        &args.rna_files,
-        &args.atac_files,
-        args.batch_files.as_deref(),
-    )?;
-
-    /* 1b. Cell QC (on by default): drop ambient / outlier cells up front —
-    before projection / collapse — so they never shape the pseudobulk or the
-    peak-to-gene links. Cell calling is driven by the RNA (gene) layer only
-    (`stack[0]`), NOT the pooled RNA+ATAC nnz: a cell with deep ATAC but no gene
-    expression must not survive on its ATAC depth. RNA and ATAC share identical
-    cell columns (validated at load), so the RNA `train_keep` masks BOTH layers.
-    `--qc-auto-cutoff` adds trough cell calling; `--qc-histogram` prints the
-    nnz distribution. */
-    if let Some(cfg) = args.qc.to_config() {
-        let report = data_beans::qc_lib::compute_qc(&paired.data_stack.stack[0], &cfg, None)?;
-        info!(
-            "cell QC (RNA-driven): dropping {} / {} cells before peak-to-gene linkage",
-            report.n_cells_dropped,
-            report.train_keep.len(),
-        );
-        if report.n_cells_dropped > 0 {
-            paired.data_stack.mask_columns_all(&report.train_keep)?;
-            paired.batch_membership =
-                data_beans::qc_lib::filter_by_keep(&paired.batch_membership, &report.train_keep);
-        }
-    }
-
-    let gene_names = paired.data_stack.stack[0].row_names()?;
-    let peak_names = paired.data_stack.stack[1].row_names()?;
-    let n_genes = gene_names.len();
-
-    /* 2. Project + collapse to a single pseudobulk level */
-    let block_size: Option<usize> = None;
+    let rna = open_sparse_matrix_by_path(&args.rna)?;
+    let gene_names = rna.row_names()?;
+    let positions = match (&args.gene_coords, &args.gff_file) {
+        (Some(tsv), _) => load_gene_coords_tsv(tsv, &gene_names)?,
+        (None, Some(gff)) => load_gene_tss(gff, &gene_names)?,
+        (None, None) => unreachable!("clap requires --gene-coords or --gff-file"),
+    };
     info!(
-        "Random projection (dim={}, {} cells)...",
-        args.proj_dim,
-        paired.data_stack.num_columns()?
+        "Gene positions: {} of {} RNA genes placed",
+        positions.iter().filter(|p| p.is_some()).count(),
+        gene_names.len()
     );
-    let proj = paired.data_stack.project_columns_with_batch_correction(
-        args.proj_dim,
-        block_size,
-        Some(&paired.batch_membership),
-    )?;
 
-    let levels = paired.data_stack.collapse_columns_multilevel_vec(
-        &proj.proj,
-        &paired.batch_membership,
-        &MultilevelParams {
-            knn_pb_samples: DEFAULT_KNN,
-            num_levels: args.num_levels.max(1),
+    // RNA-driven cell QC: a cell with deep ATAC but no expression must not pass
+    // on its ATAC depth.
+    let keep: Option<FxHashSet<Box<str>>> = match args.qc.to_config() {
+        Some(cfg) => {
+            let barcodes = rna.column_names()?;
+            let mut v = SparseIoVec::new();
+            v.push(Arc::from(rna), None)?;
+            let report = data_beans::qc_lib::compute_qc(&v, &cfg, None)?;
+            Some(
+                report
+                    .emit_idx_unmasked()
+                    .into_iter()
+                    .map(|c| barcodes[c].clone())
+                    .collect(),
+            )
+        }
+        None => None,
+    };
+
+    let kernel = AbcKernel {
+        window: args.cis_window,
+        max_per_gene: args.max_cis,
+        gamma: args.contact_gamma,
+        pseudocount: args.contact_pseudocount,
+    };
+    let input = TwoTrackInput {
+        rna_file: &args.rna,
+        atac_file: &args.atac,
+        batch_file: args.batch.as_deref(),
+        gene_positions: &positions,
+        kernel: &kernel,
+        work_prefix: &args.out,
+    };
+    let cfg = LinkConfig {
+        embed: TwoTrackConfig {
+            embedding_dim: args.embedding_dim,
+            epochs: args.epochs,
+            num_levels: args.num_levels,
             sort_dim: args.sort_dim,
-            num_opt_iter: DEFAULT_OPT_ITER,
-            refine: RefineParams::default(),
-            output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
-            anchor_batches: None,
-            bulk_batches: None,
-            observe_panels: true,
-            keep_finest_stats: false,
-            pb_tree: None,
-            strata: None,
+            proj_dim: args.proj_dim,
+            feature_modules: args.feature_modules,
+            phase1_cells_per_pb: args.phase1_cells_per_pb,
+            offset_rank: args.offset_rank,
+            offset_l2: args.offset_l2,
+            seed: args.seed,
+            ..TwoTrackConfig::default()
         },
-    )?;
-    if levels.is_empty() {
-        anyhow::bail!("collapse produced no levels");
-    }
-    // Use the hierarchically-refined finest level (most pb samples). With
-    // --num-levels > 1 the collapse refines pb assignments using the level
-    // hierarchy (bottom-up coarsening + sibling-constrained refinement);
-    // pooling levels as extra columns adds redundancy, not signal, so we take
-    // the refined finest level only.
-    let finest = levels
-        .iter()
-        .max_by_key(|lvl| pick_pseudobulk(&lvl[0], args.use_adjusted).ncols())
-        .expect("levels is non-empty");
-    let rna_pb = pick_pseudobulk(&finest[0], args.use_adjusted);
-    let atac_pb = pick_pseudobulk(&finest[1], args.use_adjusted);
-    let s = rna_pb.ncols();
-    info!(
-        "Pseudobulk: RNA {}x{}, ATAC {}x{} ({} refinement level(s), {} samples)",
-        rna_pb.nrows(),
-        s,
-        atac_pb.nrows(),
-        atac_pb.ncols(),
-        levels.len(),
-        s
-    );
-    if s < 50 {
-        info!(
-            "warning: only {} pseudobulk samples; correlations may be unstable",
-            s
-        );
-    }
-
-    /* 3. Coordinates + gene TSS */
-    let peak_coords = parse_peak_coordinates(&peak_names);
-    let gene_tss = if args.cis_window > 0 {
-        if let Some(path) = &args.gene_coords {
-            load_gene_coords_tsv(path, &gene_names)?
-        } else if let Some(path) = &args.gff_file {
-            load_gene_tss(path, &gene_names)?
-        } else {
-            anyhow::bail!("--cis-window > 0 requires either --gene-coords or --gff-file");
-        }
-    } else {
-        anyhow::bail!("--cis-window must be > 0");
+        attention: AttentionConfig {
+            rank: args.attention_rank,
+            epochs: args.attention_epochs,
+            learning_rate: args.attention_lr,
+            seed: args.seed,
+            init_gamma: f64::from(args.contact_gamma),
+            init_pseudocount: f64::from(args.contact_pseudocount),
+            ..AttentionConfig::default()
+        },
+        n_clusters: args.n_clusters,
+        ..LinkConfig::default()
     };
-
-    /* 4. Association model: shared ATAC embedding (default) or LOCO+TMLE
-    deconfounded residual statistics. The embedding reads peak→gene off a
-    low-rank topic space (sees only topic co-variation); TMLE residualizes
-    gene + peak against an off-chromosome topic confounder so confounded
-    bystanders collapse and identifiable cis links survive. */
-    let emb;
-    let tmle_state;
-    let n_eff;
-    if args.tmle {
-        let peak_chr: Vec<Option<Box<str>>> = peak_coords
-            .iter()
-            .map(|c| c.as_ref().map(|co| co.chr.clone()))
-            .collect();
-        let gene_chr: Vec<Option<Box<str>>> = gene_tss
-            .iter()
-            .map(|t| t.as_ref().map(|x| x.chr.clone()))
-            .collect();
-        let mut blocks = vec![ModalityBlock {
-            pb: atac_pb,
-            chr: &peak_chr,
-        }];
-        if !args.tmle_atac_only {
-            // Default joint RNA+ATAC confounder: a two-modality cell-state
-            // estimate (more power). LOCO drops chr-c features in BOTH blocks
-            // (off-chr genes too) so a chr-c gene's cis signal can't leak in.
-            blocks.push(ModalityBlock {
-                pb: rna_pb,
-                chr: &gene_chr,
-            });
-        }
-        info!(
-            "Building LOCO {} confounders (rank {})...",
-            if args.tmle_atac_only {
-                "ATAC"
-            } else {
-                "joint RNA+ATAC"
-            },
-            args.tmle_rank
-        );
-        let loco = LocoConfounders::build(&blocks, args.tmle_rank)?;
-        let m = loco.m;
-        let peak_clog: Vec<DVec> = (0..peak_names.len())
-            .into_par_iter()
-            .map(|p| centered_log1p(&atac_pb.row(p).iter().copied().collect::<Vec<_>>()))
-            .collect();
-        info!("LOCO confounders ready (m={}, n_eff={})", m, s - m);
-        emb = None;
-        tmle_state = Some((loco, peak_clog));
-        n_eff = s.saturating_sub(m);
-    } else {
-        info!("Building ATAC embedding (rank {})...", args.embedding_dim);
-        let e = build_atac_embedding(atac_pb, args.embedding_dim)?;
-        info!("ATAC embedding: {} peaks x {} dims", e.w.nrows(), e.d);
-        emb = Some(e);
-        tmle_state = None;
-        n_eff = s;
-    }
-
-    let ko_params = KnockoffParams {
-        ridge: args.ko_ridge,
-        seed: args.seed,
-        s_method: args.ko_s.into(),
-    };
-    let use_fdr = args.fdr > 0.0;
-
-    /* 5. Per-gene fine-mapping (parallel over genes) */
-    let per_gene: Vec<Vec<LinkRecord>> = (0..n_genes)
-        .into_par_iter()
-        .map(|g| {
-            let Some(tss) = gene_tss[g].as_ref() else {
-                return Vec::new();
-            };
-            let mut cis = find_cis_peaks(tss, &peak_coords, args.cis_window);
-            if cis.is_empty() {
-                return Vec::new();
-            }
-            let peak_mid = |p: usize| -> i64 {
-                peak_coords[p]
-                    .as_ref()
-                    .map(|c| (c.start + c.end) / 2)
-                    .unwrap_or(0)
-            };
-            if cis.len() > args.max_cis {
-                cis.sort_by_key(|&p| (peak_mid(p) - tss.tss).abs());
-                cis.truncate(args.max_cis);
-            }
-
-            // Marginal z + peak–peak LD R, via whichever estimator is active.
-            let (z_raw, r) = if let Some((loco, peak_clog)) = tmle_state.as_ref() {
-                let gene_clog = centered_log1p(&rna_pb.row(g).iter().copied().collect::<Vec<_>>());
-                let w = loco.get(&tss.chr);
-                let (z, r, _n_eff) = cis_link_stats_tmle(&gene_clog, peak_clog, &cis, w);
-                (z, r)
-            } else {
-                let emb = emb.as_ref().expect("embedding built when !tmle");
-                let gene_rate: Vec<f32> = rna_pb.row(g).iter().copied().collect();
-                let proj = project_gene(emb, &gene_rate);
-                cis_link_stats(&proj, emb, &cis, n_eff as f64)
-            };
-            let mut z = z_raw.clone();
-            if !args.no_pve_adjust {
-                z.iter_mut().for_each(|zc| *zc = pve_adjust(*zc, n_eff));
-            }
-
-            let params = FinemapParams {
-                num_components: args.num_components,
-                prior_var: args.prior_var,
-            };
-            let (pip, eff_mean, eff_std) = finemap_gene(&r, &z, &params);
-
-            // Knockoff importance W from the raw (pre-PVE) z, keeping the N(0,R)
-            // null. The pooled FDR threshold is applied after all genes score.
-            let w_stat = if use_fdr {
-                knockoff_w(&z_raw, &r, &ko_params, g)
-            } else {
-                vec![f32::NAN; cis.len()]
-            };
-
-            cis.iter()
-                .enumerate()
-                .map(|(j, &p)| {
-                    let (chr, start, end) = match peak_coords[p].as_ref() {
-                        Some(co) => (co.chr.clone(), co.start, co.end),
-                        None => (".".into(), 0i64, 0i64),
-                    };
-                    let mid = (start + end) / 2;
-                    LinkRecord {
-                        chr,
-                        start,
-                        end,
-                        peak_id: peak_names[p].clone(),
-                        gene_id: gene_names[g].clone(),
-                        pip: pip[j],
-                        effect_mean: eff_mean[j],
-                        effect_std: eff_std[j],
-                        z: z[j],
-                        distance: (mid - tss.tss).abs(),
-                        w_stat: w_stat[j],
-                        selected: false,
-                    }
-                })
-                .collect()
-        })
-        .collect();
-
-    let n_skipped = per_gene.iter().filter(|v| v.is_empty()).count();
-    let mut records: Vec<LinkRecord> = per_gene.into_iter().flatten().collect();
+    let summary = run_links(&input, &cfg, keep.as_ref())?;
     info!(
-        "Fine-mapped {} genes ({} skipped: no TSS / no cis peaks)",
-        n_genes - n_skipped,
-        n_skipped
+        "Done: {} genes, {} peaks, {} cis pairs, {} clusters → {}.links.parquet",
+        summary.n_genes, summary.n_peaks, summary.n_pairs, summary.n_clusters, args.out
     );
-
-    /* 6. Pooled knockoff filter (genome-wide FDR over links) */
-    if use_fdr {
-        let all_w: Vec<f32> = records.iter().map(|r| r.w_stat).collect();
-        let tau = knockoff_threshold(&all_w, args.fdr);
-        let mut n_sel = 0usize;
-        for rec in records.iter_mut() {
-            if rec.w_stat.is_finite() && rec.w_stat >= tau {
-                rec.selected = true;
-                n_sel += 1;
-            }
-        }
-        info!(
-            "Knockoff filter (FDR={:.3}): threshold W>={:.4}, {} links selected",
-            args.fdr, tau, n_sel
-        );
-    }
-
-    /* 7. Write */
-    let path = format!("{}.results.bed.gz", args.out);
-    write_bed(&mut records, args.pip_threshold, use_fdr, &path)?;
     Ok(())
-}
-
-/// Pick `mu_adjusted` (batch-corrected) when requested and available, else
-/// `mu_observed`. Returns the [features, samples] posterior-mean intensities.
-fn pick_pseudobulk(co: &data_beans::alg::collapse_data::CollapsedOut, use_adjusted: bool) -> &Mat {
-    if use_adjusted {
-        if let Some(adj) = co.mu_adjusted.as_ref() {
-            return adj.posterior_mean();
-        }
-    }
-    co.mu_observed.posterior_mean()
 }
