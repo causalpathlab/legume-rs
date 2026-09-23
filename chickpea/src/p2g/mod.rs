@@ -8,6 +8,7 @@
 
 pub mod cis;
 pub mod gene_track;
+pub mod peak_foldin;
 pub mod run;
 pub mod tracks;
 pub mod two_track;
