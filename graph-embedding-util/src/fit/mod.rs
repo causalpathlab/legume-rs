@@ -195,8 +195,11 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // claims to carry — matched features take the parent's module, unmatched
     // ones are initialized through the parent's modules); otherwise the
     // feature partition of the finest level's counts (`module_partition`).
-    let profile = finest_profile();
-    let (counts, sizes) = {
+    //
+    // Build only the dense matrix each branch needs. Both are `[n_features ×
+    // n_pb]`; on a wide ATAC axis that is hundreds of MiB each, and leaving
+    // both live through hier::train and phase 2 roughly doubles peak memory.
+    let finest_counts = || -> (DMatrix<f32>, Vec<f32>) {
         let finest = collapsed_levels.last().expect("at least one level");
         let cell_to_pb = cell_to_pb_per_level.last().expect("at least one level");
         let (counts, sizes) = finest.observed_counts(cell_to_pb);
@@ -225,6 +228,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     };
     let mut module_only: Vec<bool> = Vec::new();
     let (labels, n_modules) = if let Some((modality, flags)) = &module_only_plan {
+        let (counts, sizes) = finest_counts();
         module_only = modality.iter().map(|&k| flags[k as usize]).collect();
         // One group per modality, every modality with the same module count.
         let n_modalities = flags.len();
@@ -259,6 +263,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                     "parent modules are {}-dimensional but this fit uses H={h}",
                     parent.mu.ncols()
                 );
+                let profile = finest_profile();
                 let logits = module_partition::parent_module_logits(parent, &profile);
                 info!(
                     "Phase 1 (hier) — module partition seeded from the parent's membership ({} \
@@ -270,17 +275,20 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                     parent.mu.nrows(),
                 )
             }
-            None => (
-                // The partition is over GENES, so it reads the base track's
-                // rows re-keyed by gene; identity on one track.
-                module_partition::partition_modules(
-                    &module_partition::base_track_profile(&counts, &tracks),
-                    &sizes,
+            None => {
+                let (counts, sizes) = finest_counts();
+                (
+                    // The partition is over GENES, so it reads the base track's
+                    // rows re-keyed by gene; identity on one track.
+                    module_partition::partition_modules(
+                        &module_partition::base_track_profile(&counts, &tracks),
+                        &sizes,
+                        n_per_modality,
+                        config.seed,
+                    )?,
                     n_per_modality,
-                    config.seed,
-                )?,
-                n_per_modality,
-            ),
+                )
+            }
         }
     };
     let out = hier::train(
