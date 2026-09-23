@@ -77,7 +77,7 @@ pub fn write_fixture(dir: &std::path::Path) -> (String, String) {
         path
     };
     (
-        write("rna.zarr", &rna, &names("GENE", N_GENES)),
+        write("rna.zarr", &rna, &gene_names()),
         write("atac.zarr", &atac, &peak_names),
     )
 }
@@ -114,9 +114,15 @@ pub fn index(name: &str) -> usize {
 pub fn write_gene_coords(dir: &std::path::Path) -> String {
     let path = dir.join("genes.tsv").to_string_lossy().into_owned();
     let mut s = String::from("gene\tchr\ttss\n");
-    for (g, name) in names("GENE", N_GENES).iter().enumerate() {
+    for (g, name) in gene_names().iter().enumerate() {
         s.push_str(&format!("{name}\tchr1\t{}\n", tss(g)));
     }
     std::fs::write(&path, s).unwrap();
     path
+}
+
+/// `GENE_1`, `GENE_2`, …: an underscore, as simulator and 10x names carry, so
+/// every test covers names a gene-symbol canonicalizer would rewrite.
+pub fn gene_names() -> Vec<Box<str>> {
+    names("GENE_", N_GENES)
 }

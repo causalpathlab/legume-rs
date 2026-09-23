@@ -144,12 +144,32 @@ pub fn embed_two_track(
     let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
         data_files: vec![inp.rna_file.into(), track_file.into()],
         batch_files: inp.batch_file.map(|b| vec![b.into()]),
-        feature_kind: Some(ge::FeatureNameKind::Gene { delim: '_' }),
+        // Both files carry the RNA file's gene names verbatim, so match them
+        // exactly: a gene-symbol rule would rewrite `x_y` names and alias
+        // different genes to one another.
+        feature_kind: Some(ge::FeatureNameKind::Exact),
         column_alignment: ColumnAlignment::Union,
         per_file_feature_suffix: Some(vec![RNA_TAG.into(), ATAC_TAG.into()]),
         ..Default::default()
     })?;
     let tracks = gene_tracks(&unified.feature_names)?;
+    // Fail before the fit, not after it, if the load renamed any gene.
+    {
+        let loaded: rustc_hash::FxHashSet<&str> = unified
+            .feature_names
+            .iter()
+            .filter_map(|n| n.rsplit_once('/').map(|(g, _)| g))
+            .collect();
+        let missing = gene_names
+            .iter()
+            .filter(|g| !loaded.contains(g.as_ref()))
+            .count();
+        anyhow::ensure!(
+            missing == 0,
+            "{missing} of {} RNA genes are missing from the loaded axis",
+            gene_names.len()
+        );
+    }
     let h = cfg.embedding_dim;
     let config = ge::FitConfig {
         embedding_dim: h,
