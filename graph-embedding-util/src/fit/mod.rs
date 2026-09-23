@@ -8,7 +8,7 @@ mod config;
 pub mod hier;
 mod models;
 pub mod module_args;
-pub mod module_warm;
+pub mod module_partition;
 pub mod pb_readout;
 pub mod projection;
 pub mod resolve_embedding;
@@ -21,7 +21,7 @@ pub use config::{
     TrackSpec,
 };
 pub use module_args::FeatureModuleArgs;
-pub use module_warm::{parent_module_logits, warm_start_module_labels};
+pub use module_partition::{parent_module_logits, partition_modules};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
 pub use projection::{CellEncoder, CellEncoders, TrackEncoder};
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
@@ -35,7 +35,9 @@ use log::info;
 use nalgebra::DMatrix;
 
 use legume_numeric::matrix::traits::ConvertMatOps;
-use projection::{project_cells_phase2, CellBatchFold, DistillLevel, DistillSpec, PHASE2_RIDGE};
+use projection::{
+    project_cells_phase2, CellBatchFold, DistillLevel, DistillSpec, RowCollapse, PHASE2_RIDGE,
+};
 pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
@@ -192,50 +194,101 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // (the argmax of `parent_module_logits`, i.e. the partition `senna update`
     // claims to carry — matched features take the parent's module, unmatched
     // ones are initialized through the parent's modules); otherwise the
-    // k-means warm start over the finest level's profiles.
-    let profile = finest_profile();
-    let (labels, n_modules) = match config
+    // feature partition of the finest level's counts (`module_partition`).
+    //
+    // Build only the dense matrix each branch needs. Both are `[n_features ×
+    // n_pb]`; on a wide ATAC axis that is hundreds of MiB each, and leaving
+    // both live through hier::train and phase 2 roughly doubles peak memory.
+    let finest_counts = || -> (DMatrix<f32>, Vec<f32>) {
+        let finest = collapsed_levels.last().expect("at least one level");
+        let cell_to_pb = cell_to_pb_per_level.last().expect("at least one level");
+        let (counts, sizes) = finest.observed_counts(cell_to_pb);
+        (
+            setup::gather_to_unified_axis(&counts, n_features, &feature_to_backend),
+            sizes,
+        )
+    };
+    let n_per_modality = config
         .feature_modules
         .as_ref()
-        .and_then(|g| g.parent.as_ref())
-    {
-        Some(parent) => {
-            anyhow::ensure!(
-                tracks.is_base(),
-                "module warm start from a parent needs a single-track feature axis"
-            );
-            anyhow::ensure!(
-                parent.mu.ncols() == h,
-                "parent modules are {}-dimensional but this fit uses H={h}",
-                parent.mu.ncols()
-            );
-            let logits = module_warm::parent_module_logits(parent, &profile);
-            info!(
-                "Phase 1 (hier) — module partition seeded from the parent's membership ({} \
-                 modules)",
-                parent.mu.nrows()
-            );
-            (
-                hier::partition::labels_from_membership(&logits),
-                parent.mu.nrows(),
-            )
+        .context("the hierarchical phase 1 needs a module count (feature_modules)")?
+        .n_modules;
+    let parent = config
+        .feature_modules
+        .as_ref()
+        .and_then(|g| g.parent.as_ref());
+    // Module-only modalities: a multiome axis, one track, no parent partition,
+    // and a modality at least `module_only_min_rows` rows wide.
+    let module_only_plan = match (unified.feature_modality.as_deref(), parent) {
+        (Some(modality), None) if tracks.is_base() => {
+            module_partition::module_only_modalities(modality, config.module_only_min_rows)
+                .map(|flags| (modality, flags))
         }
-        None => {
-            let n = config
-                .feature_modules
-                .as_ref()
-                .context("the hierarchical phase 1 needs a module count (feature_modules)")?
-                .n_modules;
-            (
-                // The partition is over GENES, so the warm start reads the
-                // base track's rows re-keyed by gene; identity on one track.
-                module_warm::warm_start_module_labels(
-                    &module_warm::base_track_profile(&profile, &tracks),
-                    n,
-                    config.seed,
-                ),
-                n,
-            )
+        _ => None,
+    };
+    let mut module_only: Vec<bool> = Vec::new();
+    let (labels, n_modules) = if let Some((modality, flags)) = &module_only_plan {
+        let (counts, sizes) = finest_counts();
+        module_only = modality.iter().map(|&k| flags[k as usize]).collect();
+        // One group per modality, every modality with the same module count.
+        let n_modalities = flags.len();
+        let (labels, n) = module_partition::partition_modules_by_group(
+            &counts,
+            &sizes,
+            modality,
+            &vec![n_per_modality; n_modalities],
+            config.seed,
+        )?;
+        info!(
+            "Phase 1 (hier) — modality-pure modules: {n_per_modality} per modality, {n} in \
+             total; module-only modalities {:?} ({} features)",
+            flags
+                .iter()
+                .enumerate()
+                .filter(|(_, &f)| f)
+                .map(|(k, _)| k)
+                .collect::<Vec<_>>(),
+            module_only.iter().filter(|&&b| b).count(),
+        );
+        (labels, n)
+    } else {
+        match parent {
+            Some(parent) => {
+                anyhow::ensure!(
+                    tracks.is_base(),
+                    "module warm start from a parent needs a single-track feature axis"
+                );
+                anyhow::ensure!(
+                    parent.mu.ncols() == h,
+                    "parent modules are {}-dimensional but this fit uses H={h}",
+                    parent.mu.ncols()
+                );
+                let profile = finest_profile();
+                let logits = module_partition::parent_module_logits(parent, &profile);
+                info!(
+                    "Phase 1 (hier) — module partition seeded from the parent's membership ({} \
+                 modules)",
+                    parent.mu.nrows()
+                );
+                (
+                    hier::partition::labels_from_membership(&logits),
+                    parent.mu.nrows(),
+                )
+            }
+            None => {
+                let (counts, sizes) = finest_counts();
+                (
+                    // The partition is over GENES, so it reads the base track's
+                    // rows re-keyed by gene; identity on one track.
+                    module_partition::partition_modules(
+                        &module_partition::base_track_profile(&counts, &tracks),
+                        &sizes,
+                        n_per_modality,
+                        config.seed,
+                    )?,
+                    n_per_modality,
+                )
+            }
         }
     };
     let out = hier::train(
@@ -253,6 +306,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             offset_l2: config.offset_l2,
             offset_rank: config.offset_rank,
             device: config.device.clone(),
+            module_only: module_only.clone(),
         },
         config.preset_features.as_ref(),
         &config.preset_offsets,
@@ -395,6 +449,9 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             batch_fold,
             Some(&spec),
             &tracks,
+            // Module-only rows share their module's row: phase 2 runs on one
+            // row per such module (`None` when there are none).
+            RowCollapse::from_modules(&module_only, &labels).as_ref(),
         )?
     };
 
