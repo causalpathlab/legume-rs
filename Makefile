@@ -1,4 +1,4 @@
-BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim gene-text lupin mung
+BINARIES := senna pinto cocoa chickpea data-beans data-beans-sim gene-text lupin mung
 
 # Packages whose crate directory / Cargo package name differs from the
 # installed binary name. `mung` is the CLI; the crate stays `cnv`.
@@ -14,13 +14,12 @@ crate_pkg_case = case $$bin in \
 	*) pkg=$$bin; extra_feat=; from_crates=;; \
 	esac
 
-# Binaries with no `cuda` / `metal` feature to pass. `faba` reads BAM files and
-# writes sparse matrices; nothing on that path touches a GPU, and the
-# model-fitting subcommands that once did now live in senna. Passing a backend
+# Binaries with no `cuda` / `metal` feature to pass. Passing a backend
 # feature these crates do not declare makes cargo fail, which the loops below
 # would then "recover" from by retrying on CPU -- a wasted compile and a
 # summary line that reads like a GPU failure. Build them as CPU directly.
-CPU_ONLY_BINARIES := faba
+# (faba used to be here; it now lives at causalpathlab/faba on crates.io.)
+CPU_ONLY_BINARIES :=
 
 # Backend selection.
 #

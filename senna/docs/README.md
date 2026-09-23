@@ -28,5 +28,5 @@ that. At gem's default `--n-hvg 0` every gene is trained, so this holds by const
 run `--n-hvg > 0`, pass `senna gem --markers` pointing at *the same marker file* the annotation
 uses. See `annotation-methods.md` §1.
 
-The per-cell feature matrices these commands read are produced by `faba`; see
-[`faba/docs`](../../faba/docs/README.md) for how they are built.
+The per-cell feature matrices these commands read are produced by
+[`faba`](https://github.com/causalpathlab/faba); see its docs for how they are built.
