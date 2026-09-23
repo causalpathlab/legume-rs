@@ -1,26 +1,21 @@
-//! peak-to-gene subcommand: summary-statistics fine-mapping of cis peak→gene
-//! links. Entry point: [`run::run_peak_to_gene`].
+//! peak-to-gene: gene-centric cis-regulatory links for paired RNA + ATAC.
+//! Entry point: [`run::run_peak_to_gene`].
 //!
-//! Pipeline: pseudobulk the matched RNA + ATAC cells, embed peaks (and the
-//! projected genes) in a shared ATAC latent space, score each cis peak–gene
-//! pair by a log-linear regression z in that space, then fine-map per gene
-//! with SuSiE-RSS using the peak–peak correlation (LD) structure.
+//! Peaks are aggregated onto genes through ABC contact weights and embedded as
+//! a second track of the gene axis next to RNA ([`two_track`]). Peak rows are
+//! folded in against the pseudobulk embeddings ([`peak_foldin`]), and each
+//! gene attends over its cis peaks ([`attention`]); the shares are the links,
+//! reported overall and per cell cluster ([`context`], [`workflow`]).
 
 pub mod attention;
 pub mod cis;
 pub mod context;
 pub mod gene_track;
+pub mod input;
 pub mod peak_foldin;
 pub mod run;
 pub mod tracks;
 pub mod two_track;
 pub mod workflow;
-
-mod embed;
-mod finemap;
-mod input;
-mod knockoff;
-mod output;
-mod tmle;
 
 pub use run::{run_peak_to_gene, PeakToGeneArgs};

@@ -109,3 +109,14 @@ pub fn index(name: &str) -> usize {
         .unwrap()
         - 1
 }
+
+/// `{dir}/genes.tsv`: `gene chr tss` with a header, as the simulator writes.
+pub fn write_gene_coords(dir: &std::path::Path) -> String {
+    let path = dir.join("genes.tsv").to_string_lossy().into_owned();
+    let mut s = String::from("gene\tchr\ttss\n");
+    for (g, name) in names("GENE", N_GENES).iter().enumerate() {
+        s.push_str(&format!("{name}\tchr1\t{}\n", tss(g)));
+    }
+    std::fs::write(&path, s).unwrap();
+    path
+}
