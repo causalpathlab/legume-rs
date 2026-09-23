@@ -19,8 +19,6 @@ use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const REPORT_EVERY: usize = 50;
-
 pub struct HierConfig {
     pub n_modules: usize,
     pub epochs: usize,
@@ -283,20 +281,22 @@ pub fn train(
         let per_unit = 1.0 / n_units_seen.max(1) as f64;
         last_per_unit = (acc.loss_module + acc.loss_gene + acc.loss_ridge) * per_unit;
         bar.inc(1);
-        if (epoch + 1).is_multiple_of(REPORT_EVERY) || epoch + 1 == cfg.epochs {
-            let ms = t0.elapsed().as_secs_f64() * 1e3 / ((epoch + 1) * steps_per_epoch) as f64;
-            info!(
-                "Phase 1 (hier) — epoch {}/{}: loss/unit {:.4} (module {:.4}, gene {:.4}, \
-                 ridge {:.4}), {:.1} ms/step",
-                epoch + 1,
-                cfg.epochs,
-                last_per_unit,
-                acc.loss_module * per_unit,
-                acc.loss_gene * per_unit,
-                acc.loss_ridge * per_unit,
-                ms
-            );
-        }
+        // Every epoch, at info: visible under `-v`, silent otherwise.
+        let elapsed = t0.elapsed().as_secs_f64();
+        let ms = elapsed * 1e3 / ((epoch + 1) * steps_per_epoch) as f64;
+        let eta = elapsed / (epoch + 1) as f64 * (cfg.epochs - epoch - 1) as f64;
+        info!(
+            "Phase 1 (hier) — epoch {}/{}: loss/unit {:.4} (module {:.4}, gene {:.4}, \
+             ridge {:.4}), {:.1} ms/step, eta {:.0} s",
+            epoch + 1,
+            cfg.epochs,
+            last_per_unit,
+            acc.loss_module * per_unit,
+            acc.loss_gene * per_unit,
+            acc.loss_ridge * per_unit,
+            ms,
+            eta
+        );
     }
     bar.finish_and_clear();
 
