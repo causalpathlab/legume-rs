@@ -6,6 +6,7 @@
 //! pair by a log-linear regression z in that space, then fine-map per gene
 //! with SuSiE-RSS using the peak–peak correlation (LD) structure.
 
+pub mod attention;
 pub mod cis;
 pub mod gene_track;
 pub mod peak_foldin;
