@@ -201,7 +201,7 @@ pub struct SrtLinkCommunityArgs {
                      merge cosine is computed.\n\
                      They are NOT dropped from any other output.\n\
                      \n\
-                     Unset (the default) picks N by the same 2-means split\n\
+                     Unset (the default) picks N by the same nnz-histogram trough\n\
                      data-beans uses for cell QC.\n\
                      Pass 0 to score every feature, which is the pre-fix behaviour.\n\
                      \n\

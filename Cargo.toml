@@ -117,7 +117,7 @@ wide = "0.7"
 
 # Published foundation / product crates (also developed in their own repos)
 cnv = { path = "cnv" }
-data-beans = { version = "0.6.8" }
+data-beans = { version = "0.6.9" }
 enrichment = { path = "enrichment" }
 faba = { path = "faba" }
 genomic-data = { path = "genomic-data" }

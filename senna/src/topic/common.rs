@@ -228,7 +228,7 @@ pub(crate) fn resolve_level_coarsenings(
             target.clamp(min_target, finest_target)
         })
         .collect();
-    let (counts, sizes) = finest.collapsed.observed_counts(finest.cell_to_pb);
+    let (counts, sizes) = finest.collapsed.observed_counts(finest.cell_to_pb)?;
     Ok(coarsen_features(&counts, &sizes, &level_targets, seed)?
         .into_iter()
         .map(Some)
