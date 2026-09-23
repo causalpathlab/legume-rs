@@ -38,7 +38,7 @@ struct SummaryRow {
 
 /// Decide the cells of one batch on its `_count` matrix, through the
 /// data-beans cell QC in one pass: a near-empty floor (the larger of
-/// `--column-nnz-cutoff` and `--qc-min-cell-nnz`), the 2-means suggestion
+/// `--column-nnz-cutoff` and `--qc-min-cell-nnz`), the trough suggestion
 /// under `--auto-cutoff`, and the MAD-outlier drops unless `--no-cell-qc`.
 /// Writes the per-cell verdicts and the kept barcodes beside the outputs.
 fn decide_cells(
@@ -91,7 +91,7 @@ fn decide_cells(
 }
 
 /// `data-beans squeeze`'s rule for a feature-axis nnz cutoff: an explicit
-/// non-zero value wins, else the 2-means suggestion under `--auto-cutoff`,
+/// non-zero value wins, else the trough suggestion under `--auto-cutoff`,
 /// else nothing. Empty rows always drop.
 fn row_cutoff(args: &QcArgs, nnz: &[usize], label: &str) -> usize {
     let nnz_f: Vec<f32> = nnz.iter().map(|&x| x as f32).collect();
@@ -108,7 +108,7 @@ fn row_cutoff(args: &QcArgs, nnz: &[usize], label: &str) -> usize {
     if args.show_histogram {
         print_nnz_summary(label, "nnz", &nnz_f, cutoff, suggested);
     } else if args.auto_cutoff {
-        info!("{label}: row nnz cutoff {cutoff} (2-means suggestion {suggested:?})");
+        info!("{label}: row nnz cutoff {cutoff} (trough suggestion {suggested:?})");
     }
     cutoff.max(1)
 }
