@@ -22,7 +22,7 @@
 
 use super::{block_sgd, densify_mapped, null_intercept, CellEncoder, FoldedRow};
 use crate::fit::config::TrackSpec;
-use crate::fit::projection::FrozenProjection;
+use crate::fit::projection::{FrozenProjection, RowCollapse};
 use legume_numeric::candle::candle_core::Tensor;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -176,6 +176,20 @@ impl CellEncoders {
     /// shape, and the only one where a node's global feature ids can be fed to
     /// the encoder unsplit. The rows of a track are ascending and distinct, so
     /// a count equal to the axis width means the identity map.
+    /// A one-track set trained on a collapsed axis, handed to its callers on
+    /// the full one: the trunk folds full-axis nodes through `collapse` before
+    /// it reads them, and the set spans the full axis's rows.
+    pub(crate) fn onto_full_axis(&mut self, collapse: RowCollapse) -> anyhow::Result<()> {
+        let [only] = self.encoders.as_mut_slice() else {
+            anyhow::bail!("a collapsed axis has exactly one track, so one encoder");
+        };
+        let n_full = collapse.row_of.len();
+        only.encoder.collapse = Some(collapse);
+        only.rows = (0..n_full as u32).collect();
+        self.n_features = n_full;
+        Ok(())
+    }
+
     fn spans_axis(&self) -> bool {
         match self.encoders.as_slice() {
             [only] => only.rows.len() == self.n_features,

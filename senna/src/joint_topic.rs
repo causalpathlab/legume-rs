@@ -1,4 +1,4 @@
-use crate::topic::common::{create_device, setup_stop_handler};
+use crate::topic::common::{create_device, setup_stop_handler, COARSENING_SEED};
 use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
 use senna::embed_common::*;
 use senna::senna_input::{
@@ -249,7 +249,11 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         None => None,
     };
 
-    let mut collapsed_levels: Vec<Vec<CollapsedOut>> = data_stack.collapse_columns_multilevel_vec(
+    let StackCollapseOut {
+        levels: mut collapsed_levels,
+        cell_to_pb_per_level,
+    } = collapse_stack_multilevel_with_hierarchy(
+        &mut data_stack,
         &proj_kn,
         batch_stack[0].as_ref(),
         &MultilevelParams {
@@ -262,7 +266,9 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             anchor_batches: None,
             bulk_batches: None,
             observe_panels: true,
-            keep_finest_stats: false,
+            // The feature coarsening reads the finest level's counts
+            // (`CollapsedOut::observed_counts`).
+            keep_finest_stats: true,
             pb_tree: args.collapse.pb_tree_params(),
             strata,
         },
@@ -281,14 +287,15 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .map(|x| x.mu_observed.nrows())
         .collect();
 
-    // Joint-topic uses a single-level coarsening per modality; the multilevel
-    // helper still wins us the bottom-up KNN init + DC-Poisson refinement.
-    let coarsen_one = |sketch: &nalgebra::DMatrix<f32>| -> anyhow::Result<FeatureCoarsening> {
-        let mut levels = crate::topic::common::coarsen_features_multilevel(
-            sketch,
-            &[cap.map_or(0, std::num::NonZeroUsize::get)],
-            data_beans::alg::dc_poisson::RefineParams::default(),
-        )?;
+    // One coarsening level per modality, from its finest pseudobulk counts —
+    // the same `coarsen_features` `senna topic` uses.
+    let cell_to_pb_finest = cell_to_pb_per_level
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("the collapse returned no pseudobulk membership"))?;
+    let coarsen_one = |collapsed: &CollapsedOut| -> anyhow::Result<FeatureCoarsening> {
+        let (counts, sizes) = collapsed.observed_counts(cell_to_pb_finest);
+        let targets = [cap.map_or(0, std::num::NonZeroUsize::get)];
+        let mut levels = coarsen_features(&counts, &sizes, &targets, COARSENING_SEED)?;
         Ok(levels.remove(0))
     };
 
@@ -297,9 +304,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             // Delta mode: shared coarsening from reference modality
             let n_full = n_features_full[0];
             if cap.is_some_and(|c| n_full > c.get()) {
-                let collapsed_ref = &collapsed_data_vec[0];
-                let sketch = collapsed_ref.mu_observed.posterior_mean().clone();
-                let fc = coarsen_one(&sketch)?;
+                let fc = coarsen_one(&collapsed_data_vec[0])?;
                 info!(
                     "Shared coarsening: {} → {} coarse features",
                     n_full, fc.num_coarse
@@ -317,8 +322,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
                 .map(
                     |(d, (collapsed, &n_full))| -> anyhow::Result<Option<FeatureCoarsening>> {
                         if cap.is_some_and(|c| n_full > c.get()) {
-                            let sketch = collapsed.mu_observed.posterior_mean().clone();
-                            let fc = coarsen_one(&sketch)?;
+                            let fc = coarsen_one(collapsed)?;
                             info!(
                                 "Modality {}: coarsened {} → {} coarse features",
                                 d, n_full, fc.num_coarse

@@ -792,8 +792,20 @@ pub fn fit_cell_activity_graph_embedding(
                 n_features,
                 n_pb
             );
+            // The profiles are the finest pseudobulks' count sums; a
+            // pseudobulk's size is its cell count.
+            let finest = ml
+                .all_cell_labels
+                .last()
+                .expect("coarsening produced no levels");
+            let mut sizes = vec![0f32; n_pb];
+            for &pb in finest {
+                if pb < n_pb {
+                    sizes[pb] += 1.0;
+                }
+            }
             let labels =
-                graph_embedding_util::warm_start_module_labels(profiles, gm.n_modules, c.seed);
+                graph_embedding_util::partition_modules(profiles, &sizes, gm.n_modules, c.seed)?;
             info!(
                 "learned feature modules: {} features → {} modules (mixed membership), feature dropout {}, \
                  exact module term λ={}, balance λ={}",

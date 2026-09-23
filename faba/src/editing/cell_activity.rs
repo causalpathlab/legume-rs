@@ -997,6 +997,9 @@ fn log_family_expression(
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: matrix_paths.to_vec(),
         column_alignment: ColumnAlignment::Disjoint,
+        // The null side is every barcode the scan did not select; gating
+        // would thin it to cells and change the contrast.
+        keep_empty_barcodes: true,
         ..Default::default()
     })?;
     let backend = &loaded.data;

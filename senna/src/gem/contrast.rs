@@ -17,7 +17,7 @@
 //! `count`-only axis with no `unspliced` row at all) contributes no rows.
 //!
 //! This table is per-FEATURE. A cell whose counts sit only on a non-base
-//! track carries a floor `b_cell` from the per-track polish (an absent base
+//! track carries a floor `b_cell` from its per-track intercept (an absent base
 //! track reads at the score-clamp floor); that is a per-CELL fact already
 //! recorded in `{out}.cell_bias.parquet`, written the same way `senna bge`
 //! writes it; nothing here special-cases it.

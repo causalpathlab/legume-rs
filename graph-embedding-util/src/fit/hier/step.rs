@@ -103,6 +103,9 @@ pub struct StepCtx<'a> {
     pub um: &'a UnitModules,
     pub part: &'a Partition,
     pub sup: &'a TrackSupport,
+    /// Per module, `true` when it has no gene level: a module-only module,
+    /// whose members' rows are its own row. Empty when every module has one.
+    pub skip_module: &'a [bool],
 }
 
 /// `‖t‖²_F / n`: a table's mean row norm² over `n` rows.
@@ -191,6 +194,7 @@ fn track_groups<'a>(ctx: &'a StepCtx<'a>, plan: &'a StepPlan, t: usize) -> Vec<G
         .pairs_by_module
         .iter()
         .filter(|((tt, _), _)| *tt as usize == t)
+        .filter(|((_, m), _)| ctx.skip_module.get(*m as usize) != Some(&true))
         .map(|((_, m), pairs)| {
             let members = &part.members[*m as usize];
             let genes: Vec<u32> = if sup.is_full(t) {
@@ -486,10 +490,16 @@ pub fn apply(
         }
         Ok(())
     };
-    // The whole dictionary is pinned or none of it: an all-zero mask.
-    let mu_mask = params
-        .mu_frozen
-        .then(|| Tensor::zeros((params.mu.dims()[0], 1), DType::F32, &params.dev))
+    // Only the modules a pinning preset has members in are held.
+    let mu_mask = (!params.mu_pinned.is_empty())
+        .then(|| {
+            let keep: Vec<f32> = params
+                .mu_pinned
+                .iter()
+                .map(|&pinned| if pinned { 0.0 } else { 1.0 })
+                .collect();
+            Tensor::from_vec(keep, (params.mu_pinned.len(), 1), &params.dev)
+        })
         .transpose()?;
     pair(
         &mut opt.mu,

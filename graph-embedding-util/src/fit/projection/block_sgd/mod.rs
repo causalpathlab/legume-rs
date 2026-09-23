@@ -10,11 +10,9 @@
 //! whole pass a sequence of two dense matmuls per step instead of a per-cell
 //! Newton solve.
 //!
-//! A one-track feature axis (`senna bge`) solves the single shared partition
-//! below directly. A multi-track axis (`senna gem`'s modality offset tracks)
-//! instead runs the per-track polish in [`tracks`]: one Poisson partition and
-//! one intercept per track, against the same shared latent. See that module's
-//! doc for the per-track objective.
+//! It solves one shared partition over the whole axis. A fit with an encoder
+//! does not come here for its cells: the encoder places them and each track's
+//! intercept is exact at that placement ([`super::encoder`]).
 //!
 //! # The objective
 //!
@@ -91,11 +89,8 @@
 //! [`edges`] flattens the sampler's edges once per pass and sizes the blocks;
 //! [`pass`] holds the frozen per-pass design ([`pass::PassDict`]) apart from the
 //! block loop that runs nodes against it, and owns the per-block argument/result
-//! types; [`solve`] is the Adam loop for one block. [`tracks`] is the same polish
-//! on a MULTI-track feature axis — one Poisson partition and one intercept per
-//! track — which [`polish_cells`] dispatches to when the axis has more than one;
-//! a one-track axis never enters it. The tuning constants, the caller-facing types
-//! and the entry points stay here.
+//! types; [`solve`] is the Adam loop for one block. The tuning constants, the
+//! caller-facing types and the entry points stay here.
 //!
 //! There are two entry points, differing only in who owns the dictionary.
 //! [`project_cells`] takes a whole node set and builds the design for it;
@@ -105,7 +100,6 @@
 
 use super::CellBatchFold;
 use crate::cell_projection::SCORE_CLAMP;
-use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
 use legume_numeric::candle::candle_core::Device;
 use log::info;
@@ -113,7 +107,6 @@ use log::info;
 mod edges;
 mod pass;
 mod solve;
-mod tracks;
 
 use edges::EdgeTable;
 use pass::{run_pass, PassSpec};
@@ -129,9 +122,6 @@ pub(crate) use pass::{DictSpec, PassDict, PassOut};
 /// convex, so this is a backstop, not the normal exit — the run logs how many
 /// blocks actually hit it.
 const MAX_STEPS: usize = 400;
-/// Step cap for a warm-started solve ([`polish_cells`]): the start is already
-/// near the optimum, so a quarter of the cold budget.
-const POLISH_STEPS: usize = 100;
 
 /// Converged when the relative parameter change `‖ΔΘ‖/‖Θ‖` over the last
 /// [`CHECK_EVERY`] steps drops below this. A parameter criterion, not a loss
@@ -359,7 +349,6 @@ pub(crate) fn project_cells(
         &dict,
         &PassSpec {
             edges: &edges,
-            init_theta: None,
             max_steps: MAX_STEPS,
         },
         cells,
@@ -402,88 +391,12 @@ pub(crate) fn project_prepared(
         dict,
         &PassSpec {
             edges: &edges,
-            init_theta: None,
             max_steps: MAX_STEPS,
         },
         nodes,
         bar,
     )?;
     Ok(finish(input, nodes, pass))
-}
-
-/// Finish a warm-started solve: the same per-cell objective as
-/// [`project_cells`], started from `init` (`[n_cells × h]`,
-/// indexed by position in `cells`) and capped at [`POLISH_STEPS`] Adam steps
-/// per block. The per-cell problem is convex, so what the warm start leaves is
-/// the distance to one optimum, not a choice among several. Training-side
-/// entry: builds the dictionary and applies the batch fold.
-///
-/// `tracks` selects the objective, and a one-track axis is dispatched away
-/// **before** anything here runs: [`TrackSpec::is_base`] sends it to the
-/// single-partition pass below, untouched and with nothing added to its path.
-/// Any other axis goes to [`tracks::polish_tracks`], which gives each track its
-/// own Poisson partition and its own intercept (see that module for the
-/// objective) and returns them in [`PassOut::other_intercepts`].
-pub(crate) fn polish_cells(
-    input: &Phase2Input,
-    cells: &[(u32, &[u32], &[f32])],
-    batch_fold: Option<CellBatchFold>,
-    init: &[f32],
-    tracks: &TrackSpec,
-) -> anyhow::Result<PassOut> {
-    if !tracks.is_base() {
-        return tracks::polish_tracks(input, cells, batch_fold, init, tracks);
-    }
-    let n_features = input.b_feat.len();
-    let rows: Vec<u32> = (0..n_features as u32).collect();
-    let edges = EdgeTable::build(cells, &rows, n_features, batch_fold);
-    let dict = PassDict::build(&input.dict_spec("polish"), rows)?;
-    let bar = new_progress_bar(cells.len() as u64);
-    bar.enable_steady_tick(std::time::Duration::from_millis(200));
-    let out = polish_pass(input, &dict, &edges, cells, init, &bar);
-    bar.finish_and_clear();
-    out
-}
-
-/// [`polish_cells`] on a dictionary the caller has already built — the
-/// streaming counterpart, as [`project_prepared`] is to [`project_cells`].
-pub(crate) fn polish_prepared(
-    input: &Phase2Input,
-    dict: &PassDict,
-    nodes: &[(u32, &[u32], &[f32])],
-    init: &[f32],
-    bar: &indicatif::ProgressBar,
-) -> anyhow::Result<PassOut> {
-    let edges = EdgeTable::build(nodes, dict.rows(), input.b_feat.len(), None);
-    polish_pass(input, dict, &edges, nodes, init, bar)
-}
-
-fn polish_pass(
-    input: &Phase2Input,
-    dict: &PassDict,
-    edges: &EdgeTable,
-    cells: &[(u32, &[u32], &[f32])],
-    init: &[f32],
-    bar: &indicatif::ProgressBar,
-) -> anyhow::Result<PassOut> {
-    anyhow::ensure!(
-        init.len() == cells.len() * input.h,
-        "phase-2 polish: init has {} entries, expected {} × {}",
-        init.len(),
-        cells.len(),
-        input.h
-    );
-    run_pass(
-        input,
-        dict,
-        &PassSpec {
-            edges,
-            init_theta: Some(init),
-            max_steps: POLISH_STEPS,
-        },
-        cells,
-        bar,
-    )
 }
 
 /// Re-gauge the pass results and scatter them onto the global node axis — the tail

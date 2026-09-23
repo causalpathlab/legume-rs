@@ -178,36 +178,20 @@ pub struct UpdateArgs {
     add_embedding_dim: usize,
 }
 
-/// Locate the parent's recorded input files.
+/// Resolve the parent's recorded input paths against the run directory.
 ///
-/// The two candidate readings exist because the manifest is asymmetric.
-/// *Outputs* are stored as bare basenames, so resolving them against the
-/// manifest's directory is exactly right and a run directory can be moved.
-/// *Data inputs* are stored *verbatim as the training command spelled them*
-/// (`write_run_manifest` assigns `desc.data_input` unchanged) — i.e. relative
-/// to the training **cwd**, which equals the manifest's directory only when the
-/// run was written with a bare `-o prefix`.
-///
-/// So neither reading alone is correct: as-recorded breaks a moved or copied
-/// run directory, and manifest-relative breaks `-o subdir/prefix`. Prefer the
-/// path that exists, which succeeds wherever either would, and fall back to
-/// as-recorded so the loader reports the name the user would recognise.
-///
-/// The real fix is to relativize data paths at write time the way outputs
-/// already are; that changes every producer and every manifest on disk, so it
-/// is deliberately not done here. `inherit_from` has the same gap.
+/// Same policy as annotate / `--from` / [`senna::run_manifest::inherit_from`]:
+/// manifests store data paths relative to the run dir (or absolute when
+/// outside it). No cwd fallback — a same-named file in the caller's working
+/// directory must not win.
 fn recorded_paths(recorded: &[String], dir: &Path) -> Vec<Box<str>> {
     recorded
         .iter()
         .map(|s| {
-            if Path::new(s).exists() {
-                return s.as_str().into();
-            }
-            let rel = senna::run_manifest::resolve(dir, s);
-            if rel.exists() {
-                return rel.to_string_lossy().into_owned().into();
-            }
-            s.as_str().into()
+            senna::run_manifest::resolve(dir, s)
+                .to_string_lossy()
+                .into_owned()
+                .into()
         })
         .collect()
 }

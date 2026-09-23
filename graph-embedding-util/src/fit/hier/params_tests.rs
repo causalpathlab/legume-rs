@@ -68,7 +68,7 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
         mode: PresetMode::Freeze,
     };
     let mut p = HierParams::new(2, 2, 4, h, 1, &dev).unwrap();
-    p.preset(&given, &module_of).unwrap();
+    p.preset(&given, &module_of, &[]).unwrap();
     let (mu, r) = (as_vec(&p.mu), as_vec(&p.r));
     assert_eq!(
         &mu[0..2],
@@ -87,7 +87,12 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
             assert!((composed - given.rows[i * h + k]).abs() < 1e-6);
         }
     }
-    assert!(p.mu_frozen && p.is_frozen_gene(0) && !p.is_frozen_gene(2));
+    assert_eq!(
+        p.mu_pinned,
+        vec![true, true],
+        "both modules have a given member"
+    );
+    assert!(p.is_frozen_gene(0) && !p.is_frozen_gene(2));
     let mask = to_host(p.r_mask.as_ref().unwrap()).unwrap();
     assert_eq!(mask, vec![0.0, 0.0, 1.0, 0.0]);
     assert!(p.lora.is_none());
@@ -105,9 +110,10 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
             ..given.clone()
         },
         &module_of,
+        &[],
     )
     .unwrap();
-    assert!(!q.mu_frozen && q.r_mask.is_none() && q.frozen_gene.is_empty());
+    assert!(q.mu_pinned.is_empty() && q.r_mask.is_none() && q.frozen_gene.is_empty());
 
     let mut l = HierParams::new(2, 2, 4, h, 1, &dev).unwrap();
     l.preset(
@@ -120,6 +126,7 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
             ..given.clone()
         },
         &module_of,
+        &[],
     )
     .unwrap();
     let lora = l.lora.as_ref().expect("factors under lora");
@@ -139,7 +146,8 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
         as_vec(&lora.gene.v).iter().all(|&x| x == 0.0),
         "the residual starts at nothing"
     );
-    assert!(l.mu_frozen && l.r_mask.is_some());
+    assert_eq!(l.mu_pinned, vec![true, true]);
+    assert!(l.r_mask.is_some());
     assert!(HierParams::new(2, 2, 4, h, 1, &dev)
         .unwrap()
         .preset(
@@ -151,7 +159,8 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
                 }),
                 ..given
             },
-            &module_of
+            &module_of,
+            &[],
         )
         .is_err());
 }
@@ -181,7 +190,7 @@ fn a_given_offset_base_composes_on_its_track_and_the_mode_sets_its_pin() {
     let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
 
     let mut p = HierParams::new_tracked(2, 2, 4, 2, h, 1, 1, &dev).unwrap();
-    p.preset(&given, &module_of).unwrap();
+    p.preset(&given, &module_of, &[]).unwrap();
     p.preset_offsets(&offsets, PresetMode::Freeze).unwrap();
     let o = &p.offsets[0];
     assert_eq!(o.pinned_genes().unwrap(), vec![true, false, false, true]);
@@ -226,6 +235,7 @@ fn a_given_offset_base_composes_on_its_track_and_the_mode_sets_its_pin() {
                 ..given.clone()
             },
             &module_of,
+            &[],
         )
         .unwrap();
         q.preset_offsets(&offsets, mode).unwrap();
@@ -244,7 +254,7 @@ fn a_given_offset_base_composes_on_its_track_and_the_mode_sets_its_pin() {
 
     let bad = |off: PresetOffsets, mode: PresetMode| -> bool {
         let mut p = HierParams::new_tracked(2, 2, 4, 2, h, 1, 1, &dev).unwrap();
-        p.preset(&given, &module_of).unwrap();
+        p.preset(&given, &module_of, &[]).unwrap();
         p.preset_offsets(&[off], mode).is_err()
     };
     let off = |track: u32, ids: Vec<u32>, n: usize| PresetOffsets {

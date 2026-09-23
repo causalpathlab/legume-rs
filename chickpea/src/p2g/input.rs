@@ -49,6 +49,9 @@ pub fn load_paired_data(
         // Exact: keep gene symbols verbatim so they match --gene-coords/--gff-file
         // and stay readable in the output (auto-detect would mangle e.g. `gene_0`).
         feature_kind: Some(FeatureNameKind::Exact),
+        // Loaded apart, so a per-file gate would call RNA and ATAC cells
+        // differently and break the exact shared-cell match below.
+        keep_empty_barcodes: true,
         ..Default::default()
     })?;
 
@@ -60,6 +63,7 @@ pub fn load_paired_data(
         preload: false,
         // Exact: keep peak loci verbatim so `parse_peak_coordinates` reads them.
         feature_kind: Some(FeatureNameKind::Exact),
+        keep_empty_barcodes: true,
         ..Default::default()
     })?;
 

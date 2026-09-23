@@ -2,6 +2,7 @@ use super::*;
 use crate::data::Triplet;
 use crate::fit::config::{TrackInfo, TrackSpec};
 use crate::fit::hier::units::UnitTable;
+use crate::fit::projection::RowCollapse;
 use crate::{LoraSpec, PresetMode, PresetOffsets};
 use std::sync::atomic::AtomicBool;
 
@@ -13,11 +14,108 @@ fn t(cell: u32, feature: u32, count: f32) -> Triplet {
     }
 }
 
+/// The shared baseline; each test overrides only the fields it is about.
+fn cfg() -> HierConfig {
+    HierConfig {
+        n_modules: 2,
+        epochs: 200,
+        units_per_step: 8,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 3,
+        offset_l2: 0.0,
+        offset_rank: 2,
+        device: Device::Cpu,
+        module_only: Vec::new(),
+    }
+}
+
+/// `train` with the stop flag down.
+fn run(
+    units: &UnitTable,
+    labels: &[u32],
+    h: usize,
+    cfg: &HierConfig,
+    preset: Option<&PresetGenes>,
+    offsets: &[PresetOffsets],
+) -> anyhow::Result<HierOutput> {
+    train(
+        units,
+        labels,
+        h,
+        cfg,
+        preset,
+        offsets,
+        &AtomicBool::new(false),
+    )
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let d: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let n = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    d / (n(a) * n(b)).max(1e-12)
+}
+
+fn row(m: &DMatrix<f32>, r: usize) -> Vec<f32> {
+    m.row(r).iter().copied().collect()
+}
+
+/// Distinct given rows for `ids`, `h` columns each.
+fn given_rows(ids: &[u32], h: usize) -> Vec<f32> {
+    ids.iter()
+        .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
+        .collect()
+}
+
+fn preset(ids: &[u32], rows: &[f32], mode: PresetMode) -> PresetGenes {
+    PresetGenes {
+        ids: ids.to_vec(),
+        rows: rows.to_vec(),
+        mode,
+    }
+}
+
+/// Every given gene's row came out exactly as given.
+fn assert_rows_pinned(out: &HierOutput, ids: &[u32], rows: &[f32], h: usize) {
+    for (i, &g) in ids.iter().enumerate() {
+        for k in 0..h {
+            assert_eq!(
+                out.rho[(g as usize, k)],
+                rows[i * h + k],
+                "given gene {g} column {k} moved"
+            );
+        }
+    }
+}
+
+/// Gene `g`'s trained row is not its random initial residual.
+fn left_its_init(
+    out: &HierOutput,
+    units: &UnitTable,
+    cfg: &HierConfig,
+    h: usize,
+    g: usize,
+) -> bool {
+    let init = HierParams::new(
+        units.n_units(),
+        cfg.n_modules,
+        out.rho.nrows(),
+        h,
+        cfg.seed,
+        &Device::Cpu,
+    )
+    .unwrap();
+    let r0 = to_host(init.r.as_tensor()).unwrap();
+    row(&out.rho, g)
+        .iter()
+        .zip(&r0[g * h..(g + 1) * h])
+        .any(|(a, b)| (a - b).abs() > 1e-6)
+}
+
 /// Two planted programs: units 0..10 count genes 0..10, units 10..20 count
-/// genes 10..20 (with a little of the other). Training must separate the
-/// two unit groups and put each gene's row on its program's side.
-#[test]
-fn planted_programs_separate_units_and_genes() {
+/// genes 10..20 (with a little of the other).
+fn planted_units() -> (UnitTable, Vec<u32>) {
     let mut trip = Vec::new();
     for u in 0..20u32 {
         let own = if u < 10 { 0..10u32 } else { 10..20u32 };
@@ -30,35 +128,71 @@ fn planted_programs_separate_units_and_genes() {
         }
     }
     let units = UnitTable::from_pseudobulks_and_cells(&[&trip], &[20], &[], None, 20);
-    let labels: Vec<u32> = (0..20u32).map(|g| if g < 10 { 0 } else { 1 }).collect();
-    let cfg = HierConfig {
-        n_modules: 2,
-        epochs: 200,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
-        seed: 3,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
+    let labels: Vec<u32> = (0..20u32).map(|g| u32::from(g >= 10)).collect();
+    (units, labels)
+}
+
+/// The planted programs on two tracks of the same 20 genes, with the programs
+/// SWAPPED on track 1, so every gene's track-1 row sits a planted shift away
+/// from its track-0 row. Returns the units, the module labels and `n_g`.
+fn planted_two_track_units() -> (UnitTable, Vec<u32>, u32) {
+    let (n_g, n_u) = (20u32, 20u32);
+    let mut trip = Vec::new();
+    for u in 0..n_u {
+        let own = if u < 10 { 0..10u32 } else { 10..20u32 };
+        let other = if u < 10 { 10..20u32 } else { 0..10u32 };
+        for g in own.clone() {
+            trip.push(t(u, g, 20.0 + (g % 3) as f32));
+        }
+        for g in other {
+            trip.push(t(u, g, 1.0));
+            trip.push(t(u, g + n_g, 20.0 + (g % 3) as f32));
+        }
+        for g in own {
+            trip.push(t(u, g + n_g, 1.0));
+        }
+    }
+    let n_features = 2 * n_g as usize;
+    let track = |name: &str| TrackInfo {
+        name: name.into(),
+        is_count: true,
     };
-    let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
+    let tracks = TrackSpec {
+        track_of_row: (0..n_features)
+            .map(|r| (r >= n_g as usize) as u32)
+            .collect(),
+        gene_of_row: (0..n_features).map(|r| (r % n_g as usize) as u32).collect(),
+        tracks: vec![track("t0"), track("t1")],
+    };
+    let units = UnitTable::from_pseudobulks_and_cells_tracked(
+        &[&trip],
+        &[n_u as usize],
+        &[],
+        None,
+        n_features,
+        tracks,
+    );
+    let labels: Vec<u32> = (0..n_g).map(|g| u32::from(g >= 10)).collect();
+    (units, labels, n_g)
+}
+
+/// Training separates the two unit groups and puts each gene's row on its
+/// program's side.
+#[test]
+fn planted_programs_separate_units_and_genes() {
+    let (units, labels) = planted_units();
+    let out = run(&units, &labels, 4, &cfg(), None, &[]).unwrap();
     assert_eq!(out.rho.nrows(), 20);
-    let cos = |a: &[f32], b: &[f32]| {
-        let d: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        d / (a.iter().map(|x| x * x).sum::<f32>().sqrt()
-            * b.iter().map(|x| x * x).sum::<f32>().sqrt())
-        .max(1e-12)
+    let e = |u| row(&out.e_u, u);
+    assert!(cosine(&e(0), &e(1)) > cosine(&e(0), &e(15)) + 0.3);
+    let score = |g: usize, u: usize| {
+        row(&out.rho, g)
+            .iter()
+            .zip(e(u))
+            .map(|(a, b)| a * b)
+            .sum::<f32>()
+            + out.b_feat[g]
     };
-    // unit 0 and unit 1 are alike; unit 0 and unit 15 are not
-    let e = |u: usize| out.e_u.row(u).iter().copied().collect::<Vec<_>>();
-    assert!(cos(&e(0), &e(1)) > cos(&e(0), &e(15)) + 0.3);
-    // gene 3 scores higher against unit 0 than against unit 15
-    let r = |g: usize| out.rho.row(g).iter().copied().collect::<Vec<_>>();
-    let score =
-        |g: usize, u: usize| r(g).iter().zip(e(u)).map(|(a, b)| a * b).sum::<f32>() + out.b_feat[g];
     assert!(score(3, 0) > score(3, 15));
     assert!(out.final_loss_per_unit.is_finite());
 }
@@ -72,12 +206,8 @@ fn the_stop_flag_ends_training_early_with_finite_output() {
         epochs: 1000,
         units_per_step: 2,
         modules_per_unit: 1,
-        lr: 0.1,
-        weight_decay: 0.0,
         seed: 1,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
+        ..cfg()
     };
     let stop = AtomicBool::new(true);
     let out = train(&units, &[0, 0], 2, &cfg, None, &[], &stop).unwrap();
@@ -122,7 +252,7 @@ fn draw_plan_weights_sum_to_one_per_unit() {
 }
 
 /// The base track spec is what the untracked constructor builds, so the same
-/// fixture trained through either one must come out identical — every table,
+/// fixture trained through either one must come out identical: every table,
 /// exactly, not merely close.
 #[test]
 fn single_track_output_is_identical_through_both_constructors() {
@@ -136,19 +266,12 @@ fn single_track_output_is_identical_through_both_constructors() {
         t(2, 3, 6.0),
     ];
     let cfg = HierConfig {
-        n_modules: 2,
         epochs: 25,
         units_per_step: 2,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
         seed: 17,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
+        ..cfg()
     };
     let labels = vec![0u32, 0, 1, 1];
-    let stop = AtomicBool::new(false);
     let plain = UnitTable::from_pseudobulks_and_cells(&[&trip], &[3], &[], None, 4);
     let tracked = UnitTable::from_pseudobulks_and_cells_tracked(
         &[&trip],
@@ -158,89 +281,27 @@ fn single_track_output_is_identical_through_both_constructors() {
         4,
         TrackSpec::base(4),
     );
-    let a = train(&plain, &labels, 3, &cfg, None, &[], &stop).unwrap();
-    let b = train(&tracked, &labels, 3, &cfg, None, &[], &stop).unwrap();
+    let a = run(&plain, &labels, 3, &cfg, None, &[]).unwrap();
+    let b = run(&tracked, &labels, 3, &cfg, None, &[]).unwrap();
     assert_eq!(a.e_u, b.e_u);
     assert_eq!(a.rho, b.rho);
     assert_eq!(a.b_feat, b.b_feat);
 }
 
-/// Two tracks of the same 20 genes, with the programs SWAPPED on track 1:
-/// units 0..10 count genes 0..10 on track 0 and genes 10..20 on track 1. A
-/// gene's track-1 row must therefore sit on the other unit group's side, and
-/// the move from its track-0 row must point along the planted contrast between
-/// the two unit groups' embeddings.
-/// Twenty units in two programs over twenty genes on two tracks; track 1
-/// swaps the programs, so every gene's track-1 row sits a planted shift away
-/// from its track-0 row. Returns the units, the module labels and `n_g`.
-fn planted_two_track_units() -> (UnitTable, Vec<u32>, u32) {
-    let (n_g, n_u) = (20u32, 20u32);
-    let mut trip = Vec::new();
-    for u in 0..n_u {
-        let own = if u < 10 { 0..10u32 } else { 10..20u32 };
-        let other = if u < 10 { 10..20u32 } else { 0..10u32 };
-        for g in own.clone() {
-            trip.push(t(u, g, 20.0 + (g % 3) as f32));
-        }
-        for g in other.clone() {
-            trip.push(t(u, g, 1.0));
-            // track 1 swaps the two programs: rows n_g..2·n_g are the same genes
-            trip.push(t(u, g + n_g, 20.0 + (g % 3) as f32));
-        }
-        for g in own {
-            trip.push(t(u, g + n_g, 1.0));
-        }
-    }
-    let n_features = 2 * n_g as usize;
-    let tracks = TrackSpec {
-        track_of_row: (0..n_features)
-            .map(|r| (r >= n_g as usize) as u32)
-            .collect(),
-        gene_of_row: (0..n_features).map(|r| (r % n_g as usize) as u32).collect(),
-        tracks: vec![
-            TrackInfo {
-                name: "t0".into(),
-                is_count: true,
-            },
-            TrackInfo {
-                name: "t1".into(),
-                is_count: true,
-            },
-        ],
-    };
-    let units = UnitTable::from_pseudobulks_and_cells_tracked(
-        &[&trip],
-        &[n_u as usize],
-        &[],
-        None,
-        n_features,
-        tracks,
-    );
-    let labels: Vec<u32> = (0..n_g).map(|g| u32::from(g >= 10)).collect();
-    (units, labels, n_g)
-}
-
+/// On the swapped second track a gene's track-1 row sits on the other unit
+/// group's side: the move from its track-0 row points along the planted
+/// contrast between the two unit groups' embeddings.
 #[test]
 fn planted_two_track_programs() {
     let (units, labels, n_g) = planted_two_track_units();
     let cfg = HierConfig {
-        n_modules: 2,
-        epochs: 200,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
-        seed: 3,
         offset_l2: 0.01,
-        offset_rank: 2,
-        device: Device::Cpu,
+        ..cfg()
     };
-    let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
+    let out = run(&units, &labels, 4, &cfg, None, &[]).unwrap();
     assert_eq!(out.rho.nrows(), 2 * n_g as usize);
     assert_eq!(out.b_feat.len(), 2 * n_g as usize);
 
-    // The planted contrast: where the second unit group sits, minus the first.
     let group_mean = |lo: usize, hi: usize| -> Vec<f32> {
         (0..4)
             .map(|k| (lo..hi).map(|u| out.e_u[(u, k)]).sum::<f32>() / (hi - lo) as f32)
@@ -248,52 +309,26 @@ fn planted_two_track_programs() {
     };
     let (a, b) = (group_mean(0, 10), group_mean(10, 20));
     let planted: Vec<f32> = b.iter().zip(&a).map(|(x, y)| x - y).collect();
-    let cos = |x: &[f32], y: &[f32]| {
-        let d: f32 = x.iter().zip(y).map(|(p, q)| p * q).sum();
-        d / (x.iter().map(|p| p * p).sum::<f32>().sqrt()
-            * y.iter().map(|q| q * q).sum::<f32>().sqrt())
-        .max(1e-12)
-    };
     for gene in [0usize, 3, 7] {
         let shift: Vec<f32> = (0..4)
             .map(|k| out.rho[(gene + n_g as usize, k)] - out.rho[(gene, k)])
             .collect();
-        let c = cos(&shift, &planted);
+        let c = cosine(&shift, &planted);
         assert!(c > 0.5, "gene {gene}: track-1 shift cosine {c}");
     }
 }
 
 /// `HierConfig::offset_l2` is a per-EPOCH weight. A step carries `1/S` of it, so
-/// the ridge pulls equally hard over an epoch whatever the batch size — without
+/// the ridge pulls equally hard over an epoch whatever the batch size; without
 /// this, halving `units_per_step` would silently double the penalty and inflate
 /// every offset row's Adagrad accumulator twice as fast.
 #[test]
 fn the_ridge_weight_is_spread_over_the_epochs_steps() {
     assert_eq!(per_step_offset_l2(0.8, 1), 0.8);
     assert_eq!(per_step_offset_l2(0.8, 4), 0.2);
-    // 20 steps of the 4-step weight is 5 epochs' worth, not 20.
-    assert!((per_step_offset_l2(0.8, 4) * 4.0 - 0.8).abs() < 1e-7);
     // A degenerate epoch (no unit, so no step) must not divide by zero.
     assert_eq!(per_step_offset_l2(0.8, 0), 0.8);
     assert_eq!(per_step_offset_l2(0.0, 7), 0.0);
-}
-
-/// The planted fixture of `planted_programs_separate_units_and_genes`.
-fn planted_units() -> (UnitTable, Vec<u32>) {
-    let mut trip = Vec::new();
-    for u in 0..20u32 {
-        let own = if u < 10 { 0..10u32 } else { 10..20u32 };
-        let other = if u < 10 { 10..20u32 } else { 0..10u32 };
-        for g in own {
-            trip.push(t(u, g, 20.0 + (g % 3) as f32));
-        }
-        for g in other {
-            trip.push(t(u, g, 1.0));
-        }
-    }
-    let units = UnitTable::from_pseudobulks_and_cells(&[&trip], &[20], &[], None, 20);
-    let labels: Vec<u32> = (0..20u32).map(|g| if g < 10 { 0 } else { 1 }).collect();
-    (units, labels)
 }
 
 /// Frozen genes come out of training with EXACTLY the rows they went in with;
@@ -302,98 +337,48 @@ fn planted_units() -> (UnitTable, Vec<u32>) {
 fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() {
     let (units, labels) = planted_units();
     let h = 4;
-    // Freeze the even genes of both programs on planted rows; odd genes stay free.
-    let gene: Vec<u32> = (0..20u32).filter(|g| g % 2 == 0).collect();
-    let rows: Vec<f32> = gene
-        .iter()
-        .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
-        .collect();
-    let frozen = PresetGenes {
-        ids: gene.clone(),
-        rows: rows.clone(),
-        mode: PresetMode::Freeze,
-    };
+    let ids: Vec<u32> = (0..20u32).filter(|g| g % 2 == 0).collect();
+    let rows = given_rows(&ids, h);
     let cfg = HierConfig {
-        n_modules: 2,
         epochs: 50,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
         weight_decay: 0.01,
-        seed: 3,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
+        ..cfg()
     };
-    let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
-    for (i, &g) in gene.iter().enumerate() {
-        for k in 0..h {
-            assert_eq!(
-                out.rho[(g as usize, k)],
-                rows[i * h + k],
-                "frozen gene {g} column {k} moved"
-            );
-        }
-    }
-    // A free gene's row is not its random init: the module mean of the frozen
-    // rows plus a residual that trained.
-    let free_rho: Vec<f32> = out.rho.row(1).iter().copied().collect();
-    let init = HierParams::new(units.n_units(), 2, 20, h, cfg.seed, &Device::Cpu).unwrap();
-    let init_r: Vec<f32> = to_host(init.r.as_tensor()).unwrap()[h..2 * h].to_vec();
-    assert!(free_rho
-        .iter()
-        .zip(&init_r)
-        .any(|(a, b)| (a - b).abs() > 1e-6));
-    // Biases trained on frozen genes too (the positives carry counts).
-    assert!(out.b_feat.iter().any(|b| b.abs() > 1e-6));
-    assert!(gene.iter().any(|&g| out.b_feat[g as usize].abs() > 1e-6));
+    let frozen = preset(&ids, &rows, PresetMode::Freeze);
+    let out = run(&units, &labels, h, &cfg, Some(&frozen), &[]).unwrap();
+    assert_rows_pinned(&out, &ids, &rows, h);
+    assert!(
+        left_its_init(&out, &units, &cfg, h, 1),
+        "a free gene trains"
+    );
+    assert!(ids.iter().any(|&g| out.b_feat[g as usize].abs() > 1e-6));
     assert!(out.final_loss_per_unit.is_finite());
 }
 
-/// A frozen table that covers every gene fixes the whole dictionary; the module
-/// vectors are the module means of the frozen rows, so the composed rows are
-/// exact and the unit side still separates the planted programs against them.
+/// A frozen table that covers every gene fixes the whole dictionary; the unit
+/// side still separates the planted programs against it.
 #[test]
 fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
     let (units, labels) = planted_units();
     let h = 4;
-    let gene: Vec<u32> = (0..20u32).collect();
+    let ids: Vec<u32> = (0..20u32).collect();
     // Program A genes along +e0, program B genes along +e1.
-    let rows: Vec<f32> = gene
+    let rows: Vec<f32> = ids
         .iter()
         .flat_map(|&g| {
             let mut r = vec![0.0f32; h];
-            r[if g < 10 { 0 } else { 1 }] = 1.0;
+            r[usize::from(g >= 10)] = 1.0;
             r[2] = 0.01 * g as f32;
             r
         })
         .collect();
-    let frozen = PresetGenes {
-        ids: gene,
-        rows: rows.clone(),
-        mode: PresetMode::Freeze,
-    };
     let cfg = HierConfig {
-        n_modules: 2,
         epochs: 100,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
-        seed: 3,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
+        ..cfg()
     };
-    let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
-    for g in 0..20 {
-        for k in 0..h {
-            assert_eq!(out.rho[(g, k)], rows[g * h + k]);
-        }
-    }
-    // Units of program A point along e0, of program B along e1.
+    let frozen = preset(&ids, &rows, PresetMode::Freeze);
+    let out = run(&units, &labels, h, &cfg, Some(&frozen), &[]).unwrap();
+    assert_rows_pinned(&out, &ids, &rows, h);
     assert!(out.e_u[(0, 0)] > out.e_u[(0, 1)]);
     assert!(out.e_u[(15, 1)] > out.e_u[(15, 0)]);
 }
@@ -401,67 +386,31 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
 #[test]
 fn frozen_genes_must_be_in_range_and_match_h() {
     let (units, labels) = planted_units();
-    let cfg = HierConfig {
-        n_modules: 2,
-        epochs: 1,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
-        seed: 3,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
-    };
-    let stop = AtomicBool::new(false);
-    let bad_gene = PresetGenes {
-        ids: vec![20],
-        rows: vec![0.0; 4],
-        mode: PresetMode::Freeze,
-    };
-    assert!(train(&units, &labels, 4, &cfg, Some(&bad_gene), &[], &stop).is_err());
-    let bad_h = PresetGenes {
-        ids: vec![0],
-        rows: vec![0.0; 3],
-        mode: PresetMode::Freeze,
-    };
-    assert!(train(&units, &labels, 4, &cfg, Some(&bad_h), &[], &stop).is_err());
+    let cfg = HierConfig { epochs: 1, ..cfg() };
+    let bad_gene = preset(&[20], &[0.0; 4], PresetMode::Freeze);
+    assert!(run(&units, &labels, 4, &cfg, Some(&bad_gene), &[]).is_err());
+    let bad_h = preset(&[0], &[0.0; 3], PresetMode::Freeze);
+    assert!(run(&units, &labels, 4, &cfg, Some(&bad_h), &[]).is_err());
 }
 
-/// With `freeze: false` the given rows are only the starting point: training
-/// moves them, and where it starts from is the given row exactly.
+/// Under `Init` the given rows are only the starting point: training starts
+/// from the given row exactly, then moves it.
 #[test]
 fn unfrozen_preset_rows_start_where_given_and_then_train() {
     let (units, labels) = planted_units();
     let h = 4;
-    let gene: Vec<u32> = (0..20u32).collect();
+    let ids: Vec<u32> = (0..20u32).collect();
     let rows: Vec<f32> = (0..20 * h).map(|i| 0.01 * i as f32 - 0.4).collect();
-    let preset = PresetGenes {
-        ids: gene.clone(),
-        rows: rows.clone(),
-        mode: PresetMode::Init,
-    };
-    let stop = AtomicBool::new(false);
-    let cfg0 = HierConfig {
-        n_modules: 2,
-        epochs: 0,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
-        seed: 3,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
-    };
-    let start = train(&units, &labels, h, &cfg0, Some(&preset), &[], &stop).unwrap();
+    let init = preset(&ids, &rows, PresetMode::Init);
+    let cfg0 = HierConfig { epochs: 0, ..cfg() };
+    let start = run(&units, &labels, h, &cfg0, Some(&init), &[]).unwrap();
     for g in 0..20 {
         for k in 0..h {
             assert!((start.rho[(g, k)] - rows[g * h + k]).abs() < 1e-6);
         }
     }
     let cfg = HierConfig { epochs: 50, ..cfg0 };
-    let out = train(&units, &labels, h, &cfg, Some(&preset), &[], &stop).unwrap();
+    let out = run(&units, &labels, h, &cfg, Some(&init), &[]).unwrap();
     let moved = (0..20)
         .filter(|&g| (0..h).any(|k| (out.rho[(g, k)] - rows[g * h + k]).abs() > 1e-4))
         .count();
@@ -475,43 +424,29 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
 #[test]
 fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
     let (units, labels) = planted_units();
-    let h = 4;
-    let rank = 1;
-    let gene: Vec<u32> = (0..20u32).filter(|g| g % 2 == 0).collect();
-    let rows: Vec<f32> = gene
-        .iter()
-        .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
-        .collect();
-    let preset = |mode| PresetGenes {
-        ids: gene.clone(),
-        rows: rows.clone(),
-        mode,
-    };
+    let (h, rank) = (4, 1);
+    let ids: Vec<u32> = (0..20u32).filter(|g| g % 2 == 0).collect();
+    let rows = given_rows(&ids, h);
     let cfg = HierConfig {
-        n_modules: 2,
         epochs: 50,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
         weight_decay: 0.01,
-        seed: 3,
-        offset_l2: 0.0,
-        offset_rank: 2,
-        device: Device::Cpu,
+        ..cfg()
     };
-    let stop = AtomicBool::new(false);
-    let lora = preset(PresetMode::Lora(LoraSpec {
-        rank,
-        lr_ratio: 4.0,
-        ridge: 0.0,
-    }));
-    let out = train(&units, &labels, h, &cfg, Some(&lora), &[], &stop).unwrap();
-    let mut resid = nalgebra::DMatrix::<f32>::zeros(gene.len(), h);
-    for (i, &g) in gene.iter().enumerate() {
-        for k in 0..h {
-            resid[(i, k)] = out.rho[(g as usize, k)] - rows[i * h + k];
-        }
-    }
+    let lora = |rank, lr_ratio| {
+        preset(
+            &ids,
+            &rows,
+            PresetMode::Lora(LoraSpec {
+                rank,
+                lr_ratio,
+                ridge: 0.0,
+            }),
+        )
+    };
+    let out = run(&units, &labels, h, &cfg, Some(&lora(rank, 4.0)), &[]).unwrap();
+    let resid = DMatrix::<f32>::from_fn(ids.len(), h, |i, k| {
+        out.rho[(ids[i] as usize, k)] - rows[i * h + k]
+    });
     let sv = resid.singular_values();
     assert!(sv[0] > 1e-4, "the residual never moved: {sv}");
     assert!(
@@ -519,22 +454,14 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         "the residual is not rank {}: singular values {sv}",
         2 * rank
     );
-    let init = HierParams::new(units.n_units(), 2, 20, h, cfg.seed, &Device::Cpu).unwrap();
-    let init_r = to_host(init.r.as_tensor()).unwrap();
-    let free_rho: Vec<f32> = out.rho.row(1).iter().copied().collect();
-    assert!(free_rho
-        .iter()
-        .zip(&init_r[h..2 * h])
-        .any(|(a, b)| (a - b).abs() > 1e-6));
-    assert!(gene.iter().any(|&g| out.b_feat[g as usize].abs() > 1e-6));
+    assert!(
+        left_its_init(&out, &units, &cfg, h, 1),
+        "a free gene trains"
+    );
+    assert!(ids.iter().any(|&g| out.b_feat[g as usize].abs() > 1e-6));
     assert!(out.final_loss_per_unit.is_finite());
 
-    let full_rank = preset(PresetMode::Lora(LoraSpec {
-        rank: h,
-        lr_ratio: 1.0,
-        ridge: 0.0,
-    }));
-    assert!(train(&units, &labels, h, &cfg, Some(&full_rank), &[], &stop).is_err());
+    assert!(run(&units, &labels, h, &cfg, Some(&lora(h, 1.0)), &[]).is_err());
 }
 
 /// The track offsets' rank is its own number, never H: outside `1..=H` on a
@@ -542,33 +469,26 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
 #[test]
 fn the_offset_rank_is_checked_against_h_on_a_tracked_axis() {
     let (units, labels, _) = planted_two_track_units();
-    let cfg = |rank: usize| HierConfig {
-        n_modules: 2,
+    let cfg = |offset_rank| HierConfig {
         epochs: 1,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
-        seed: 3,
         offset_l2: 0.01,
-        offset_rank: rank,
-        device: Device::Cpu,
+        offset_rank,
+        ..cfg()
     };
-    let stop = AtomicBool::new(false);
     for rank in [0usize, 5] {
-        let e = match train(&units, &labels, 4, &cfg(rank), None, &[], &stop) {
+        let e = match run(&units, &labels, 4, &cfg(rank), None, &[]) {
             Ok(_) => panic!("rank {rank} outside 1..=H was accepted"),
             Err(e) => e.to_string(),
         };
         assert!(e.contains("rank") && e.contains("H=4"), "{e}");
     }
     assert!(
-        train(&units, &labels, 4, &cfg(4), None, &[], &stop).is_ok(),
+        run(&units, &labels, 4, &cfg(4), None, &[]).is_ok(),
         "rank H is legal"
     );
     let (one, labels1) = planted_units();
     assert!(
-        train(&one, &labels1, 4, &cfg(9), None, &[], &stop).is_ok(),
+        run(&one, &labels1, 4, &cfg(9), None, &[]).is_ok(),
         "one track: no offset, no rank to check"
     );
 }
@@ -581,16 +501,9 @@ fn the_offset_rank_is_checked_against_h_on_a_tracked_axis() {
 fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
     let (units, labels, n_g) = planted_two_track_units();
     let h = 4;
-    let gene: Vec<u32> = (0..n_g).filter(|g| g % 2 == 0).collect();
-    let rows: Vec<f32> = gene
-        .iter()
-        .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
-        .collect();
-    let frozen = PresetGenes {
-        ids: gene.clone(),
-        rows: rows.clone(),
-        mode: PresetMode::Freeze,
-    };
+    let ids: Vec<u32> = (0..n_g).filter(|g| g % 2 == 0).collect();
+    let rows = given_rows(&ids, h);
+    let frozen = preset(&ids, &rows, PresetMode::Freeze);
     let off_ids = vec![0u32, 4];
     let off_rows = vec![0.3f32, -0.1, 0.2, 0.0, -0.2, 0.1, 0.4, -0.3];
     let offsets = vec![PresetOffsets {
@@ -599,33 +512,21 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
         rows: off_rows.clone(),
     }];
     let cfg = HierConfig {
-        n_modules: 2,
         epochs: 50,
-        units_per_step: 8,
-        modules_per_unit: 2,
-        lr: 0.1,
-        weight_decay: 0.0,
-        seed: 3,
         offset_l2: 0.01,
-        offset_rank: 2,
-        device: Device::Cpu,
+        ..cfg()
     };
-    let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, h, &cfg, Some(&frozen), &offsets, &stop).unwrap();
+    let out = run(&units, &labels, h, &cfg, Some(&frozen), &offsets).unwrap();
     let n_g = n_g as usize;
-    for (i, &g) in gene.iter().enumerate() {
-        for k in 0..h {
-            assert_eq!(out.rho[(g as usize, k)], rows[i * h + k], "base row {g}");
-        }
-    }
+    assert_rows_pinned(&out, &ids, &rows, h);
     for (i, &g) in off_ids.iter().enumerate() {
-        let j = gene.iter().position(|&x| x == g).unwrap();
+        let j = ids.iter().position(|&x| x == g).unwrap();
         for k in 0..h {
             let want = rows[j * h + k] + off_rows[i * h + k];
+            let got = out.rho[(g as usize + n_g, k)];
             assert!(
-                (out.rho[(g as usize + n_g, k)] - want).abs() < 1e-6,
-                "gene {g} on track 1: {} vs given {want}",
-                out.rho[(g as usize + n_g, k)]
+                (got - want).abs() < 1e-6,
+                "gene {g} on track 1: {got} vs given {want}"
             );
         }
     }
@@ -641,9 +542,9 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
             lr_ratio: 4.0,
             ridge: 0.0,
         }),
-        ..frozen.clone()
+        ..frozen
     };
-    let out = train(&units, &labels, h, &cfg, Some(&lora), &offsets, &stop).unwrap();
+    let out = run(&units, &labels, h, &cfg, Some(&lora), &offsets).unwrap();
     assert!(
         off_ids.iter().enumerate().any(|(i, &g)| {
             (0..h).any(|k| {
@@ -654,4 +555,171 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
         }),
         "under lora the given offset moves on from δ₀"
     );
+}
+
+/// Two planted programs over a residual block (features 0..10) and a
+/// module-only block (10..30), each program in its own module per block.
+fn module_only_fixture() -> (UnitTable, Vec<u32>, Vec<bool>) {
+    let program = |f: u32| if f < 10 { f < 5 } else { f < 20 };
+    let mut trip = Vec::new();
+    for u in 0..20u32 {
+        let a = u < 10;
+        for f in 0..30u32 {
+            let c = if program(f) == a {
+                20.0 + (f % 3) as f32
+            } else {
+                1.0
+            };
+            trip.push(t(u, f, c));
+        }
+    }
+    let units = UnitTable::from_pseudobulks_and_cells(&[&trip], &[20], &[], None, 30);
+    let labels: Vec<u32> = (0..30u32)
+        .map(|f| match (f < 10, program(f)) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (false, false) => 3,
+        })
+        .collect();
+    let mo: Vec<bool> = (0..30).map(|f| f >= 10).collect();
+    (units, labels, mo)
+}
+
+fn module_only_cfg(module_only: Vec<bool>) -> HierConfig {
+    HierConfig {
+        n_modules: 4,
+        seed: 5,
+        module_only,
+        ..cfg()
+    }
+}
+
+/// A module-only module's biases are log shares that sum to 1, so the
+/// collapsed row bias predict rebuilds (LSE over members) is 0, whether no
+/// member was observed (uniform `-ln n`) or only some were (the observed one
+/// takes almost all the mass).
+#[test]
+fn a_module_only_modules_biases_are_log_shares_even_when_unobserved() {
+    // Residual feature 0 in module 0; module-only features 1..4 in module 1.
+    let labels = vec![0u32, 1, 1, 1];
+    let mo = vec![false, true, true, true];
+    let cfg = HierConfig {
+        module_only: mo.clone(),
+        ..cfg()
+    };
+    let collapse = RowCollapse::from_modules(&mo, &labels).unwrap();
+    let biases = |trip: &[Triplet]| {
+        let units = UnitTable::from_pseudobulks_and_cells(&[trip], &[2], &[], None, 4);
+        let s = ModuleOnly::new(&units, &labels, &cfg).unwrap().unwrap();
+        assert_eq!(s.genes, vec![1, 2, 3]);
+        let mut b_feat = vec![0f32; 4];
+        for (&g, &v) in s.genes.iter().zip(&s.bias) {
+            b_feat[g as usize] = v;
+        }
+        let (_, rb) = collapse.reduce_dictionary(&[0f32; 4], &b_feat, 1);
+        let lse = rb[collapse.row_of[1] as usize];
+        assert!(lse.abs() < 1e-4, "LSE(bias) = {lse}, want 0; {:?}", s.bias);
+        s.bias
+    };
+
+    for b in biases(&[t(0, 0, 10.0), t(1, 0, 10.0)]) {
+        assert!((b + 3f32.ln()).abs() < 1e-5, "{b} vs -ln 3");
+    }
+    let some = biases(&[t(0, 0, 5.0), t(0, 1, 100.0), t(1, 1, 100.0)]);
+    assert!(some[0] > some[1] + 5.0, "{some:?}");
+}
+
+#[test]
+fn a_module_only_feature_is_its_module_row_plus_its_count_share() {
+    let (units, labels, mo) = module_only_fixture();
+    let out = run(&units, &labels, 4, &module_only_cfg(mo), None, &[]).unwrap();
+    // Every module-only feature carries exactly its module's row.
+    for f in 11..20 {
+        assert_eq!(row(&out.rho, 10), row(&out.rho, f), "feature {f}");
+    }
+    for f in 21..30 {
+        assert_eq!(row(&out.rho, 20), row(&out.rho, f), "feature {f}");
+    }
+    assert_ne!(row(&out.rho, 10), row(&out.rho, 20));
+    // Within a module the bias differences are the log count ratios.
+    let total = |f: u32| -> f32 {
+        units.feats[..units.n_pb_units]
+            .iter()
+            .zip(&units.counts)
+            .flat_map(|(fs, cs)| fs.iter().zip(cs))
+            .filter(|(&g, _)| g == f)
+            .map(|(_, &c)| c)
+            .sum()
+    };
+    let got = out.b_feat[11] - out.b_feat[12];
+    let want = (total(11) / total(12)).ln();
+    assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+    // Residual features keep a residual of their own: not all rows alike.
+    assert_ne!(row(&out.rho, 0), row(&out.rho, 1));
+    assert_eq!(out.labels, labels, "the membership does not move");
+}
+
+/// A pinning preset holds only the modules it has members in. The module-only
+/// modules here have none, and a module-only feature has no residual to absorb
+/// a held module vector, so they must train: their rows leave the random start.
+#[test]
+fn a_pinning_preset_leaves_modules_without_given_members_free_to_train() {
+    let (units, labels, mo) = module_only_fixture();
+    let h = 4;
+    let ids: Vec<u32> = (0..10).collect();
+    let rows = given_rows(&ids, h);
+    let cfg = module_only_cfg(mo);
+    let frozen = preset(&ids, &rows, PresetMode::Freeze);
+    let out = run(&units, &labels, h, &cfg, Some(&frozen), &[]).unwrap();
+    assert_rows_pinned(&out, &ids, &rows, h);
+    let init = HierParams::new(units.n_units(), 4, 30, h, cfg.seed, &Device::Cpu).unwrap();
+    let mu0 = to_host(init.mu.as_tensor()).unwrap();
+    for (f, m) in [(10usize, 2usize), (20, 3)] {
+        let r = row(&out.rho, f);
+        assert!(
+            r.iter()
+                .zip(&mu0[m * h..(m + 1) * h])
+                .any(|(a, b)| (a - b).abs() > 1e-3),
+            "module {m} never left its random start: {r:?}"
+        );
+    }
+    assert_ne!(row(&out.rho, 10), row(&out.rho, 20));
+}
+
+/// A module-only feature carries no residual, so a pinning preset cannot hold
+/// its own row: it holds its MODULE at the mean of the given rows, and the
+/// written row is that module row (the one training used) for every member.
+#[test]
+fn a_pinned_module_only_feature_is_written_as_its_modules_given_mean() {
+    let (units, labels, mo) = module_only_fixture();
+    let h = 4;
+    let ids: Vec<u32> = (0..30).collect();
+    let rows = given_rows(&ids, h);
+    let frozen = preset(&ids, &rows, PresetMode::Freeze);
+    let out = run(&units, &labels, h, &module_only_cfg(mo), Some(&frozen), &[]).unwrap();
+    assert_rows_pinned(&out, &ids[..10], &rows, h);
+    for members in [10..20usize, 20..30] {
+        let n = members.len() as f32;
+        for k in 0..h {
+            let mean: f32 = members.clone().map(|g| rows[g * h + k]).sum::<f32>() / n;
+            for g in members.clone() {
+                assert!(
+                    (out.rho[(g, k)] - mean).abs() < 1e-5,
+                    "module-only feature {g} column {k}: {} vs module mean {mean}",
+                    out.rho[(g, k)]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_module_mixing_module_only_and_residual_features_is_refused() {
+    let (units, mut labels, mo) = module_only_fixture();
+    labels[12] = 0; // a module-only feature in a residual module
+    let err = run(&units, &labels, 4, &module_only_cfg(mo), None, &[])
+        .err()
+        .expect("a mixed module must be refused");
+    assert!(err.to_string().contains("module-only"), "{err}");
 }
