@@ -67,9 +67,9 @@ pub fn run_links(inp: &TwoTrackInput, cfg: &LinkConfig) -> anyhow::Result<LinkSu
     let (labels, _) = ge::cell_clusters(&emb.cell_rows.to_tensor(&dev)?, cfg.n_clusters)?;
     let n_clusters = labels.iter().max().map_or(0, |m| m + 1);
 
-    ///////////////////////////////////////////
+    ///////////////////////////////////////////////
     // ATAC, streamed: fold-in and λ per cluster //
-    ///////////////////////////////////////////
+    ///////////////////////////////////////////////
     let (fold, lambda) = stream_atac(inp.atac_file, &emb, &labels, n_clusters, cfg)?;
     info!(
         "Peak fold-in: {} peaks × {} dims; {n_clusters} clusters",
