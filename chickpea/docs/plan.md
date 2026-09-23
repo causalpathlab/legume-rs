@@ -27,6 +27,17 @@ faba extraction in #77).
   bge feature affinity, fne contrast, and ABC-triplet NCE as link evidence.
 - Missing output found on PBMC: per-cell cluster labels.
 
+## Status
+
+Steps 1 to 5 and test-first items 0 to 7 are in (chickpea 0.4.0): the CLI runs cis
+pairs with ABC weights, the peak-aggregated track, the two-track embedding, the
+streamed peak fold-in, the localized attention and the per-cluster tables. Sim
+smoke test (2000 genes, 10000 peaks, 3000 cells, 50 kb window, defaults otherwise):
+attention roughly triples top-1 over fixed ABC and nearly doubles top-3, while its
+pooled AUROC sits slightly below ABC's (the learned kernel flattens distance, which
+the sim rewards globally). About 5 min and 2.5 GB, mostly the 1000-epoch embedding.
+Next: step 6 (PBMC).
+
 ## Steps
 
 Each step ends with a check before the next starts.
