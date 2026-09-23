@@ -8,6 +8,7 @@
 
 pub mod attention;
 pub mod cis;
+pub mod context;
 pub mod gene_track;
 pub mod peak_foldin;
 pub mod run;
