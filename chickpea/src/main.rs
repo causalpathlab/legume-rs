@@ -37,14 +37,14 @@ fn print_logo() {
              peak-to-gene cis-regulatory linkage for paired single-cell RNA + ATAC",
     long_about = "chickpea — peak-to-gene cis-regulatory linkage\n\
                   \n\
-                  Links ATAC peaks to RNA genes.\n\
-                  The input is paired single-cell RNA + ATAC data.\n\
-                  Linkage is by summary-statistics fine-mapping, SuSiE-RSS,\n\
-                  in a shared pseudobulk embedding.\n\
+                  Links ATAC peaks to RNA genes in paired single-cell RNA + ATAC data.\n\
+                  Peaks become gene features: each gene gets an ATAC track,\n\
+                  embedded next to its RNA track against shared pseudobulks.\n\
+                  Each gene then attends over its cis peaks, and the shares are the links.\n\
                   \n\
                   Usage:\n\
-                  data-beans-sim multiome -o sim --n-topics 10 chickpea peak-to-gene --rna-files sim.rna.zarr \\\n\
-                  --atac-files sim.atac.zarr --gene-coords sim.gene_coords.tsv.gz -o out",
+                  data-beans-sim multiome -o sim && chickpea peak-to-gene --rna sim.rna.zarr \\\n\
+                  --atac sim.atac.zarr --gene-coords sim.gene_coords.tsv.gz -o out",
     term_width = 80
 )]
 struct Cli {
@@ -63,19 +63,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Fine-map cis peak→gene links via SuSiE-RSS on pseudobulk summary stats
+    /// Link cis peaks to genes by localized attention over a gene-centric embedding
     #[command(
-        long_about = "Link ATAC peaks to RNA genes by summary-statistics fine-mapping.\n\
+        long_about = "Link ATAC peaks to RNA genes.\n\
                       \n\
-                      Pseudobulk the matched RNA + ATAC cells. Embed peaks,\n\
-                      and the projected genes, in a shared ATAC latent space.\n\
-                      Score each cis peak–gene pair by a log-linear regression z there.\n\
-                      Then fine-map per gene with SuSiE-RSS,\n\
-                      using the peak–peak correlation (LD) structure.\n\
-                      This is lighter and faster than `fit-topic`, with no neural model.\n\
+                      Peak counts are aggregated onto genes through ABC contact weights.\n\
+                      RNA and peak-aggregated rows are embedded as two tracks of each gene.\n\
+                      Peak rows are folded in against the shared pseudobulk embeddings.\n\
+                      Each gene then attends over its cis peaks.\n\
+                      A score is a learned distance kernel plus a low-rank content term.\n\
+                      Training makes the pooled peak rows agree with the gene's RNA row.\n\
+                      The attention shares are the links.\n\
                       \n\
-                      Outputs {out}.results.bed.gz. Its columns are chr, start, end, peak_id,\n\
-                      gene_id, pip, effect_mean, effect_std, z and distance.",
+                      {out}.links.parquet has gene, peak, distance, abc and attention.\n\
+                      {out}.links_by_cluster.parquet has the shares within each cell cluster.\n\
+                      Gene, peak and cell embeddings and cell clusters are written too.",
         after_long_help = ENV_HELP,
         aliases = ["p2g", "peak2gene"]
     )]

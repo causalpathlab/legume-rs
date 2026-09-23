@@ -1,118 +1,83 @@
 # Chickpea
 
-**CH**romatin **I**nteraction **C**aptured by **K**nockoff **P**eak-to-**E**xpression
-**A**ssociations.
+**CH**romatin **I**nteractions **C**aptured by **K**nitting **P**eaks with
+**E**xpression **A**nchors.
 
 Peak-to-gene cis-regulatory linkage from paired single-cell RNA + ATAC.
 
-Chickpea links ATAC peaks to genes by **summary-statistics fine-mapping**: it
-pseudobulks the matched RNA + ATAC cells, embeds peaks and genes in a shared
-ATAC-derived latent space, scores each cis peak–gene pair by a regression
-z in that space, and fine-maps per gene with **SuSiE-RSS** over the peak–peak
-LD. No neural model. See [`docs/peak_to_gene_math.md`](docs/peak_to_gene_math.md)
-for the full derivation.
+Peaks enter as gene features. Each gene gets an ATAC version, its cis peaks'
+counts aggregated through ABC contact weights, and the gene axis carries two
+tracks: RNA and peak-aggregated. Both are embedded against the same pseudobulk
+embeddings, with the ATAC row tied to the RNA row by a ridge-shrunk low-rank
+offset. Each gene then attends over its own cis peaks, and the attention shares
+are the links. The design and its checks are in [`docs/plan.md`](docs/plan.md).
 
 ## Pipeline
 
 `chickpea peak-to-gene` (aliases `p2g`, `peak2gene`):
 
-1. Load paired RNA + ATAC (matched barcodes), validate shared cells.
-2. Random projection + multi-level pseudobulk collapse (batch-aware).
-3. Global ATAC embedding — rSVD of the standardized log1p ATAC pseudobulk.
-4. Per gene: read off the marginal peak→gene `z` and the peak–peak LD `R`,
-   either as embedding inner products (default) or — with `--tmle` — as
-   leave-one-chromosome-out **deconfounded** residual statistics (see below).
-5. SuSiE-RSS fine-mapping per gene → posterior inclusion probabilities (PIPs)
-   and effect sizes for each cis peak.
-6. *(optional, `--fdr q`)* pooled GhostKnockoff filter on the per-gene `(z, R)`
-   to select links at a target genome-wide FDR (the "Knockoff" in the name).
-7. Write all tested (gene, cis-peak) links to a sorted BGZF BED.
+1. **Cis candidates.** Peaks whose midpoint lies within `--cis-window` of a
+   gene's TSS, at most `--max-cis` per gene, nearest first. Each pair carries
+   the ABC contact `(d + c)^-γ`, normalised over the gene's candidates. A peak
+   near several genes is a candidate for each.
+2. **Peak-aggregated track.** Every cell's peak counts summed onto genes through
+   those weights, streamed once over the ATAC counts.
+3. **Two-track embedding.** RNA gene rows (the base track) and peak-aggregated
+   rows (base plus offset), trained with the shared two-phase engine: an exact
+   two-level softmax over multilevel pseudobulks, then per-cell embeddings.
+4. **Peak rows.** Every peak folded in against the finest pseudobulk
+   embeddings by one Poisson IRLS step, all peaks at once, streamed from cells.
+5. **Localized attention.** Each gene scores its cis peaks by a learned distance
+   kernel plus a low-rank content term between gene and peak rows. The pooled
+   peak rows are trained to agree with the gene's RNA row. Only the kernel and
+   the content map train; nothing is genes × peaks.
+6. **Per-cluster links.** Cells are clustered (Leiden), and each gene's shares
+   are re-weighted by each cluster's peak accessibility. Fixed ABC shares are
+   reported alongside as the baseline.
 
-### Deconfounding cis from topic (`--tmle`)
-
-The shared ATAC embedding reads peak→gene off a low-rank *topic* space, so a
-cis enhancer and its co-active bystanders — which share the same cell-type
-program — look alike: the topic is a confounder the embedding cannot remove.
-`--tmle` swaps the embedding association for a partially-linear, doubly-robust
-estimator (Robinson/Chernozhukov DML; named **TMLE** after van der Laan &
-Rubin's targeted-learning framing): it regresses both the gene and each peak on
-a topic confounder and reads the partial association off the residuals
-(residual-on-residual). A peak's *private*, topic-orthogonal fluctuation is the
-only part that can reach its gene, so confounded bystanders collapse while
-identifiable cis links survive.
-
-The confounder is estimated **leave-one-chromosome-out** (LOCO): the topic is
-genome-wide but a gene's cis signal is local, so a co-embedding of features
-*off* the gene's chromosome (`--tmle-rank m` factors) captures the trans
-confounder without absorbing the cis effect under test — the Neyman-orthogonality
-split that keeps the residual `z` honest.
-
-By default the confounder is a **joint RNA+ATAC** pseudobulk-sample co-embedding:
-cell state is informed by both modalities, so the topic estimate is cleaner and
-recovers more links (LOCO then drops the test chromosome's *genes* as well as
-its peaks, since a chr-`c` gene's expression carries the very cis signal under
-test). `--tmle-atac-only` falls back to an ATAC-only confounder, which controls
-FDP more tightly at some cost in power. On simulated multiome the embedding
-path's knockoff FDP runs uncontrolled (≈0.4, topic confounding) while `--tmle`
-brings it near the target; the joint confounder adds ≈5–9% power over ATAC-only.
+Cell QC (on by default, driven by the RNA counts) leaves failed cells in the
+embedding but out of clustering, accessibility rates and every cell table.
 
 ## Usage
 
-### Inference
-
 ```bash
 chickpea peak-to-gene \
-  --rna-files sim.rna.zarr \
-  --atac-files sim.atac.zarr \
+  --rna sim.rna.zarr \
+  --atac sim.atac.zarr \
   --gene-coords sim.gene_coords.tsv.gz \
   -o out
 ```
 
-Gene TSS positions come from either `--gene-coords` (a `gene<TAB>chr<TAB>tss`
-TSV) or `--gff-file` (a GFF/GTF annotation); one of the two is required when
-`--cis-window > 0`.
+Gene TSS positions come from `--gene-coords` (a `gene<TAB>chr<TAB>tss` TSV with
+a header) or `--gff-file` (GFF/GTF); one is required.
 
 Key options (see `chickpea peak-to-gene --help` for all):
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--rna-files`, `--atac-files` | — | paired matrices (zarr/h5), comma-separated |
-| `--batch-files` | — | batch labels, one per file (RNA-then-ATAC order) |
-| `--cis-window` | 500000 | bp around each TSS to enumerate cis peaks |
-| `--max-cis` | 200 | cap on cis-candidate peaks per gene (nearest) |
-| `--proj-dim` / `--sort-dim` | 64 / 14 | pseudobulk projection / binary-sort dims |
-| `--embedding-dim` | 50 | ATAC embedding rank `d` |
-| `--num-components` | 10 | SuSiE single-effect components `L` |
-| `--prior-var` | 5.0 | SuSiE prior effect variance (z-score scale) |
-| `--no-pve-adjust` | off | disable winner's-curse z shrinkage |
-| `--tmle` | off | LOCO deconfounded residual `z`/`R` instead of the embedding association |
-| `--tmle-rank` | 20 | off-chromosome topic confounder factors `m` for `--tmle` |
-| `--tmle-atac-only` | off | ATAC-only `--tmle` confounder (default is joint RNA+ATAC; tighter FDP, less power) |
-| `--num-levels` | 1 | hierarchical refinement levels; the refined finest level is used |
-| `--fdr` | 0.0 | target FDR for knockoff (z-score contrast) selected links (0 = off) |
-| `--ko-ridge` | 0.05 | knockoff LD ridge λ in `R_λ = (1-λ)R + λI` |
-| `--ko-s` | equi | knockoff diagonal `s`: `equi` / `mvr` / `me` (see note below) |
+| `--rna`, `--atac` | — | paired matrices (zarr/h5) for the same barcodes |
+| `--batch` | — | batch labels, one per barcode |
+| `--cis-window` | 500000 | max peak-midpoint distance (bp) to a TSS |
+| `--max-cis` | 200 | cap on candidate peaks per gene (nearest) |
+| `--contact-gamma`, `--contact-pseudocount` | 1, 5000 | initial ABC contact `(d + c)^-γ` |
+| `--embedding-dim` | 128 | embedding dimension |
+| `--epochs` | 1000 | embedding epochs |
+| `--offset-rank`, `--offset-l2` | 16, 1.0 | rank and ridge tying a gene's ATAC row to its RNA row |
+| `--attention-rank`, `--attention-epochs` | 16, 100 | attention content map rank and epochs |
+| `--n-clusters` | Leiden | target number of cell clusters |
 | `-o`, `--out` | — | output prefix |
 
-Output `{out}.results.bed.gz`, sorted by `(chr, start, end)`:
+Outputs, all `{out}.*.parquet`:
 
-```
-#chr  start  end  peak_id  gene_id  pip  effect_mean  effect_std  z  distance
-```
+| File | Contents |
+|------|----------|
+| `links` | one row per cis pair: `gene`, `peak`, `distance`, `abc`, `attention` (shares sum to 1 per gene) |
+| `links_by_cluster` | `gene`, `peak`, `cluster`, `attention`, `abc`: shares within each cell cluster |
+| `gene_embedding`, `gene_atac_embedding` | RNA and peak-aggregated gene rows |
+| `peak_embedding`, `peaks` | folded-in peak rows; `peak`, `chromosome`, `start`, `end`, `bias` |
+| `cell_embedding`, `cell_clusters` | per-cell rows; `cell`, `cluster` |
 
-`distance = |peak_midpoint − TSS|`. All tested pairs are written;
-`--pip-threshold` only drives a summary log line. With `--fdr q`, two columns
-are appended — `w_stat` (knockoff importance) and `selected` (0/1).
-
-The knockoff diagonal `s` (`--ko-s`) controls how decorrelated each knockoff is
-from its peak; the solver lives in `matrix-util` (`knockoff_s_{equicorrelated,
-mvr,me}`). `mvr` / `me` (Spector & Janson 2022) optimize `s` per coordinate, but
-note that **no `s`-method can rescue a rank-deficient LD**: if a gene's cis set
-is larger than the pseudobulk count can resolve, `2R−diag(s) ⪰ 0` forces `s`
-small and knockoff power collapses regardless. The effective lever there is to
-**shrink `--max-cis` and/or raise `--ko-ridge`** so `R_λ` is well-conditioned.
-`equi` is the default (as good or better than `mvr`/`me` in the well-conditioned
-regime, and far cheaper); `me` is the most aggressive (more power, looser FDP).
+`{out}.atac_gene.zarr` holds the peak-aggregated gene counts.
 
 ### Simulation
 
