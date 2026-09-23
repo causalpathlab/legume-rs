@@ -10,6 +10,7 @@ pub mod cis;
 pub mod gene_track;
 pub mod run;
 pub mod tracks;
+pub mod two_track;
 
 mod embed;
 mod finemap;
