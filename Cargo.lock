@@ -723,6 +723,7 @@ dependencies = [
  "data-beans",
  "env_logger",
  "flate2",
+ "graph-embedding-util",
  "indicatif 0.18.6",
  "legume-genomic-types",
  "legume-numeric",
@@ -7335,7 +7336,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core 0.5.3",
 ]
-
-[[patch.unused]]
-name = "data-beans"
-version = "0.6.9"
