@@ -45,7 +45,7 @@ fn the_workflow_writes_consistent_tables() {
         kernel: &kernel(),
         work_prefix: &out,
     };
-    let summary = run_links(&input, &small()).unwrap();
+    let summary = run_links(&input, &small(), None).unwrap();
     let n_pairs = N_GENES * PEAKS_PER_GENE;
     assert_eq!(summary.n_pairs, n_pairs);
     assert!(summary.n_clusters >= 2, "{} clusters", summary.n_clusters);
@@ -110,4 +110,36 @@ fn the_workflow_writes_consistent_tables() {
     )
     .unwrap();
     assert_eq!(cells[0].len(), N_CELLS);
+}
+
+/// Cells that fail QC still inform the embedding, but no written cell table,
+/// cluster or accessibility rate includes them.
+#[test]
+fn qc_failed_cells_are_left_out_of_every_cell_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let (rna, atac) = write_fixture(dir.path());
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    let genes = gene_positions();
+    let input = TwoTrackInput {
+        rna_file: &rna,
+        atac_file: &atac,
+        batch_file: None,
+        gene_positions: &genes,
+        kernel: &kernel(),
+        work_prefix: &out,
+    };
+    let dropped = ["CELL1", "CELL2", "CELL7"];
+    let keep: rustc_hash::FxHashSet<Box<str>> = common::names("CELL", N_CELLS)
+        .into_iter()
+        .filter(|b| !dropped.contains(&b.as_ref()))
+        .collect();
+    run_links(&input, &small(), Some(&keep)).unwrap();
+
+    let (cells, _) =
+        read_table_columns(&format!("{out}.cell_clusters.parquet"), &["cell"], &[]).unwrap();
+    assert_eq!(cells[0].len(), N_CELLS - dropped.len());
+    assert!(cells[0].iter().all(|c| !dropped.contains(&c.as_ref())));
+    let (emb, _) =
+        read_table_columns(&format!("{out}.cell_embedding.parquet"), &["cell"], &[]).unwrap();
+    assert_eq!(emb[0].len(), N_CELLS - dropped.len());
 }

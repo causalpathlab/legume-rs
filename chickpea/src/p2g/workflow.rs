@@ -24,7 +24,7 @@ use legume_numeric::candle::candle_core::Device;
 use legume_numeric::matrix::parquet::{write_table, Column};
 use legume_numeric::matrix::traits::ConvertMatOps;
 use nalgebra::DMatrix;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone)]
 pub struct LinkConfig {
@@ -59,13 +59,39 @@ pub struct LinkSummary {
 }
 
 /// Run everything and write the tables under `inp.work_prefix`.
-pub fn run_links(inp: &TwoTrackInput, cfg: &LinkConfig) -> anyhow::Result<LinkSummary> {
+///
+/// `keep`: barcodes that passed cell QC (`None`: every cell). Every cell
+/// informs the embedding; the others are left out of clustering, the ATAC
+/// fold-in and accessibility rates, and every written cell table.
+pub fn run_links(
+    inp: &TwoTrackInput,
+    cfg: &LinkConfig,
+    keep: Option<&FxHashSet<Box<str>>>,
+) -> anyhow::Result<LinkSummary> {
     let out = inp.work_prefix;
     let emb = embed_two_track(inp, &cfg.embed)?;
 
+    let kept: Vec<usize> = match keep {
+        Some(set) => (0..emb.barcodes.len())
+            .filter(|&c| {
+                let b = emb.barcodes[c].as_ref();
+                set.contains(b) || b.split_once('@').is_some_and(|(raw, _)| set.contains(raw))
+            })
+            .collect(),
+        None => (0..emb.barcodes.len()).collect(),
+    };
+    anyhow::ensure!(!kept.is_empty(), "no embedded cell passed QC");
+    info!("Cells: {} of {} pass QC", kept.len(), emb.barcodes.len());
+    let cell_rows = emb.cell_rows.select_rows(kept.iter());
+    let barcodes: Vec<Box<str>> = kept.iter().map(|&c| emb.barcodes[c].clone()).collect();
+
     let dev = Device::Cpu;
-    let (labels, _) = ge::cell_clusters(&emb.cell_rows.to_tensor(&dev)?, cfg.n_clusters)?;
-    let n_clusters = labels.iter().max().map_or(0, |m| m + 1);
+    let (kept_labels, _) = ge::cell_clusters(&cell_rows.to_tensor(&dev)?, cfg.n_clusters)?;
+    let n_clusters = kept_labels.iter().max().map_or(0, |m| m + 1);
+    let mut labels: Vec<Option<usize>> = vec![None; emb.barcodes.len()];
+    for (&c, &l) in kept.iter().zip(&kept_labels) {
+        labels[c] = Some(l);
+    }
 
     ///////////////////////////////////////////////
     // ATAC, streamed: fold-in and λ per cluster //
@@ -112,14 +138,14 @@ pub fn run_links(inp: &TwoTrackInput, cfg: &LinkConfig) -> anyhow::Result<LinkSu
         .map(|(_, g)| g.clone())
         .collect();
     save("gene_atac_embedding", &emb.atac_rows, &atac_names, "gene")?;
-    save("cell_embedding", &emb.cell_rows, &emb.barcodes, "cell")?;
+    save("cell_embedding", &cell_rows, &barcodes, "cell")?;
     save("peak_embedding", &fold.phi, &emb.peak_names, "peak")?;
 
-    let label_i32: Vec<i32> = labels.iter().map(|&l| l as i32).collect();
+    let label_i32: Vec<i32> = kept_labels.iter().map(|&l| l as i32).collect();
     write_table(
         &format!("{out}.cell_clusters.parquet"),
         &[
-            ("cell".into(), Column::Str(&emb.barcodes)),
+            ("cell".into(), Column::Str(&barcodes)),
             ("cluster".into(), Column::I32(&label_i32)),
         ],
     )?;
@@ -138,12 +164,13 @@ pub fn run_links(inp: &TwoTrackInput, cfg: &LinkConfig) -> anyhow::Result<LinkSu
 }
 
 /// Two passes over the ATAC cells: unit and cluster depths, then the fold-in
-/// moments and each cluster's counts. Returns the fold-in and `λ` (per-cluster
-/// accessibility rates, `[peaks × clusters]`).
+/// moments and each cluster's counts. Cells without a label (QC-failed) are
+/// skipped. Returns the fold-in and `λ` (per-cluster accessibility rates,
+/// `[peaks × clusters]`).
 fn stream_atac(
     atac_file: &str,
     emb: &TwoTrackEmbedding,
-    labels: &[usize],
+    labels: &[Option<usize>],
     n_clusters: usize,
     cfg: &LinkConfig,
 ) -> anyhow::Result<(super::peak_foldin::PeakFoldIn, DMatrix<f32>)> {
@@ -156,15 +183,22 @@ fn stream_atac(
         .map(|(i, b)| (b.as_ref(), i))
         .collect();
     let columns = atac.column_names()?;
-    let cell_idx: Vec<Option<usize>> = columns
+    // ATAC column → (embedded cell, cluster), for cells that passed QC.
+    let cell_idx: Vec<Option<(usize, usize)>> = columns
         .iter()
-        .map(|b| cell_of.get(b.as_ref()).copied())
+        .map(|b| {
+            let c = *cell_of.get(b.as_ref())?;
+            Some((c, labels[c]?))
+        })
         .collect();
     let n_matched = cell_idx.iter().filter(|c| c.is_some()).count();
-    anyhow::ensure!(n_matched > 0, "no ATAC barcode matches an embedded cell");
+    anyhow::ensure!(
+        n_matched > 0,
+        "no ATAC barcode matches an embedded cell that passed QC"
+    );
     if n_matched < columns.len() {
         info!(
-            "ATAC: {} of {} cells were not embedded and are skipped",
+            "ATAC: {} of {} cells were not embedded or failed QC, and are skipped",
             columns.len() - n_matched,
             columns.len()
         );
@@ -181,10 +215,10 @@ fn stream_atac(
     for cols in &blocks {
         let csc = atac.read_columns_csc(cols.clone().collect())?;
         for (j, col) in csc.col_iter().enumerate() {
-            if let Some(c) = cell_idx[cols.start + j] {
+            if let Some((c, k)) = cell_idx[cols.start + j] {
                 let depth: f32 = col.values().iter().sum();
                 pb_size[emb.cell_to_pb[c]] += depth;
-                cl_size[labels[c]] += depth;
+                cl_size[k] += depth;
             }
         }
     }
@@ -196,7 +230,7 @@ fn stream_atac(
     for cols in &blocks {
         let csc = atac.read_columns_csc(cols.clone().collect())?;
         for (j, col) in csc.col_iter().enumerate() {
-            let Some(c) = cell_idx[cols.start + j] else {
+            let Some((c, k)) = cell_idx[cols.start + j] else {
                 continue;
             };
             cell.clear();
@@ -208,7 +242,7 @@ fn stream_atac(
             );
             moments.add_cell(&design, emb.cell_to_pb[c], &cell);
             for &(p, x) in &cell {
-                counts[(p as usize, labels[c])] += x;
+                counts[(p as usize, k)] += x;
             }
         }
     }
