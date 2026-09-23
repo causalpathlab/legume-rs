@@ -504,13 +504,13 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // the Fisher-weight pass rather than costing a second full read.
         //
         // Per FEATURE, not per row, and on a channelized matrix that is the whole
-        // ballgame. `suggest_nnz_cutoff` is an exact 2-means split on
-        // `log1p(nnz)` that assumes the one bimodality it finds is
-        // ambient-vs-real. Row-wise, a channelized matrix carries a STRONGER
-        // second bimodality — the nascent track is detected far less often than
-        // the mature one — so the split lands between the two tracks and
-        // `keep_features` silently becomes "is this row spliced". On the feature axis
-        // that bimodality does not exist, so the question does not arise.
+        // ballgame. `suggest_nnz_cutoff` finds the deepest trough of the
+        // log(1+nnz) density between ambient and real modes. Row-wise, a
+        // channelized matrix carries a STRONGER second bimodality — the nascent
+        // track is detected far less often than the mature one — so a cut can
+        // land between the two tracks and `keep_features` silently becomes "is
+        // this row spliced". On the feature axis that bimodality does not exist,
+        // so the question does not arise.
         let feature_nnz = feature_stats.count_positives();
         let min_nnz = args
             .merge_min_nnz

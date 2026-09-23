@@ -199,14 +199,14 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // Build only the dense matrix each branch needs. Both are `[n_features ×
     // n_pb]`; on a wide ATAC axis that is hundreds of MiB each, and leaving
     // both live through hier::train and phase 2 roughly doubles peak memory.
-    let finest_counts = || -> (DMatrix<f32>, Vec<f32>) {
+    let finest_counts = || -> anyhow::Result<(DMatrix<f32>, Vec<f32>)> {
         let finest = collapsed_levels.last().expect("at least one level");
         let cell_to_pb = cell_to_pb_per_level.last().expect("at least one level");
-        let (counts, sizes) = finest.observed_counts(cell_to_pb);
-        (
+        let (counts, sizes) = finest.observed_counts(cell_to_pb)?;
+        Ok((
             setup::gather_to_unified_axis(&counts, n_features, &feature_to_backend),
             sizes,
-        )
+        ))
     };
     let n_per_modality = config
         .feature_modules
@@ -228,7 +228,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     };
     let mut module_only: Vec<bool> = Vec::new();
     let (labels, n_modules) = if let Some((modality, flags)) = &module_only_plan {
-        let (counts, sizes) = finest_counts();
+        let (counts, sizes) = finest_counts()?;
         module_only = modality.iter().map(|&k| flags[k as usize]).collect();
         // One group per modality, every modality with the same module count.
         let n_modalities = flags.len();
@@ -276,7 +276,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                 )
             }
             None => {
-                let (counts, sizes) = finest_counts();
+                let (counts, sizes) = finest_counts()?;
                 (
                     // The partition is over GENES, so it reads the base track's
                     // rows re-keyed by gene; identity on one track.

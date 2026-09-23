@@ -52,6 +52,7 @@ fn finest() -> data_beans::alg::collapse_data::CollapsedOut {
         mu_residual: None,
         gamma: None,
         delta: None,
+        stats_kept: true,
     }
 }
 
