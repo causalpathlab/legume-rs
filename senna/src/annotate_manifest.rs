@@ -208,6 +208,7 @@ fn raw_counts_load(
         data_files,
         batch_files,
         preload,
+        keep_empty_barcodes: true,
         ..Default::default()
     })
 }

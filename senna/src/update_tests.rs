@@ -1,7 +1,7 @@
 //! What `senna update` decides before it dispatches: whether to substitute the
 //! parent's carried pseudobulks, and what it does when it cannot.
 
-use super::{carried_reference_among, multiome_in_args, UpdateArgs};
+use super::{carried_reference_among, multiome_in_args, recorded_paths, UpdateArgs};
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -16,33 +16,19 @@ fn parse(extra: &[&str]) -> Result<UpdateArgs, clap::Error> {
 }
 
 /// Carrying the pseudobulks forward is what makes a round cost the new data
-/// rather than the whole history, so it is on unless asked otherwise.
+/// rather than the whole history, so it is on unless refused.
+/// `--use-pb-reference` is redundant for the behaviour, but it turns a silent
+/// fallback into an error when the parent carries nothing; asking for both is
+/// a contradiction, not a precedence puzzle.
 #[test]
 fn the_carried_reference_is_used_unless_refused() {
     let a = parse(&[]).expect("bare update parses");
-    assert!(!a.no_pb_reference, "substitution is the default");
-    assert!(!a.use_pb_reference, "and is not an explicit request");
-
+    assert!(!a.no_pb_reference && !a.use_pb_reference);
     let a = parse(&["--no-pb-reference"]).expect("opt-out parses");
     assert!(a.no_pb_reference);
-}
-
-/// The two spellings are mutually exclusive: one forces the substitution, the
-/// other forces the exact re-collapse, and asking for both is a contradiction
-/// rather than a precedence puzzle.
-#[test]
-fn forcing_both_ways_at_once_is_refused() {
+    let a = parse(&["--use-pb-reference"]).expect("explicit request parses");
+    assert!(a.use_pb_reference && !a.no_pb_reference);
     assert!(parse(&["--use-pb-reference", "--no-pb-reference"]).is_err());
-}
-
-/// `--use-pb-reference` survives as an explicit request. It is redundant for
-/// the behaviour, but it is what turns a silent fallback into an error when the
-/// parent carries nothing or the new data has no batch labels.
-#[test]
-fn the_explicit_request_still_parses() {
-    let a = parse(&["--use-pb-reference"]).expect("legacy scripts keep working");
-    assert!(a.use_pb_reference);
-    assert!(!a.no_pb_reference);
 }
 
 /// The recorded fit arguments say whether the parent loads under multiome
@@ -69,5 +55,20 @@ fn a_substituted_lineage_is_recognised_by_its_carried_reference() {
     assert_eq!(
         carried_reference_among(&substituted),
         Some("runs/r1.pb_reference.zarr.zip")
+    );
+}
+
+/// Manifests store data paths relative to the run directory; they resolve
+/// there, never against the caller's cwd, and absolute paths pass through.
+#[test]
+fn recorded_paths_resolve_against_the_run_directory() {
+    let run = std::path::Path::new("/runs/r1");
+    let got = recorded_paths(&["rna.zarr.zip".into(), "/abs/atac.zarr".into()], run);
+    assert_eq!(
+        got,
+        vec![
+            Box::from("/runs/r1/rna.zarr.zip"),
+            Box::from("/abs/atac.zarr")
+        ]
     );
 }

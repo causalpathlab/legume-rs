@@ -329,7 +329,9 @@ struct ModuleOnly {
 }
 
 /// Floor on a count total before its log, so an unseen feature gets a finite
-/// share instead of `ln 0`.
+/// share instead of `ln 0`. Applied per member before the module sum, so an
+/// all-zero module still has uniform shares `1/n` (LSE of biases = 0) rather
+/// than every bias 0 (LSE = `ln n`).
 const TOTAL_FLOOR: f32 = 1e-6;
 
 impl ModuleOnly {
@@ -370,7 +372,7 @@ impl ModuleOnly {
         let mut module_total = vec![0f32; cfg.n_modules];
         for (g, &m) in labels.iter().enumerate() {
             if mo[g] {
-                module_total[m as usize] += t[g];
+                module_total[m as usize] += t[g].max(TOTAL_FLOOR);
             }
         }
         let genes: Vec<u32> = (0..labels.len() as u32)
@@ -380,7 +382,7 @@ impl ModuleOnly {
             .iter()
             .map(|&g| {
                 let m = labels[g as usize] as usize;
-                (t[g as usize].max(TOTAL_FLOOR) / module_total[m].max(TOTAL_FLOOR)).ln()
+                (t[g as usize].max(TOTAL_FLOOR) / module_total[m]).ln()
             })
             .collect();
         Ok(Some(Self {

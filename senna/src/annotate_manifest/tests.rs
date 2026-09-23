@@ -10,7 +10,8 @@ fn manifest(inputs: &[&str]) -> RunManifest {
 }
 
 /// A single-modality run re-opens its counts as a plain load: files stacked
-/// as cells, rows as given.
+/// as cells, rows as given. Opt out of the empty-barcode gate so annotation
+/// maps onto every cell the run already has.
 #[test]
 fn a_plain_run_reopens_its_counts_as_a_plain_load() {
     let m = manifest(&["a.zarr", "/abs/b.zarr"]);
@@ -21,6 +22,7 @@ fn a_plain_run_reopens_its_counts_as_a_plain_load() {
     );
     assert!(args.per_file_feature_suffix.is_none());
     assert_eq!(args.column_alignment, ColumnAlignment::Disjoint);
+    assert!(args.keep_empty_barcodes);
 }
 
 /// A multiome run's files are modalities of ONE cell set: they must be glued
@@ -41,4 +43,5 @@ fn a_multiome_run_reopens_its_counts_under_the_recorded_layout() {
         Some(vec![Box::from("m0"), Box::from("m1")])
     );
     assert!(args.per_file_barcode_suffix.is_none());
+    assert!(args.keep_empty_barcodes);
 }
