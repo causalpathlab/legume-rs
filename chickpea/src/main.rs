@@ -91,13 +91,9 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let default_filter = if cli.verbose {
-        legume_numeric::matrix::common_io::VERBOSE_LOG_FILTER
-    } else {
-        legume_numeric::matrix::common_io::QUIET_LOG_FILTER
-    };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
-        .init();
+    // The shared logger routes log lines above the progress bars (one
+    // MultiProgress for the whole workspace), so they do not corrupt each other.
+    data_beans::aux::logging::init_logger(cli.verbose);
 
     match &cli.commands {
         Commands::PeakToGene(args) => p2g::run_peak_to_gene(args),
