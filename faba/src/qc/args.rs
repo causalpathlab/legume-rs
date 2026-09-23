@@ -132,7 +132,7 @@ pub struct QcArgs {
     #[arg(
         long = "auto-cutoff",
         default_value_t = false,
-        help = "Derive an nnz cutoff per axis by BIC-guarded 2-means on log(1+nnz) where none was given (as `data-beans squeeze --auto-cutoff`)"
+        help = "Derive an nnz cutoff per axis at the log(1+nnz) histogram trough where none was given (as `data-beans squeeze --auto-cutoff`)"
     )]
     pub auto_cutoff: bool,
 
