@@ -97,9 +97,9 @@ pub fn embed_two_track(
     inp: &TwoTrackInput,
     cfg: &TwoTrackConfig,
 ) -> anyhow::Result<TwoTrackEmbedding> {
-    /////////////////////////////////////////
+    ////////////////////////////////////////
     // Peaks onto genes, once, then on disk //
-    /////////////////////////////////////////
+    ////////////////////////////////////////
     let rna = open_sparse_matrix_by_path(inp.rna_file)?;
     let gene_names = rna.row_names()?;
     anyhow::ensure!(
@@ -138,9 +138,9 @@ pub fn embed_two_track(
     );
     drop((rna, atac));
 
-    ////////////////////////////
-    // Two tracks, one fit    //
-    ////////////////////////////
+    /////////////////////////
+    // Two tracks, one fit //
+    /////////////////////////
     let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
         data_files: vec![inp.rna_file.into(), track_file.into()],
         batch_files: inp.batch_file.map(|b| vec![b.into()]),
