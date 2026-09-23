@@ -1,7 +1,5 @@
-mod common;
-mod p2g;
-
-use crate::common::*;
+use chickpea::common::*;
+use chickpea::p2g;
 use colored::Colorize;
 
 const LOGO: &str = include_str!("../logo.txt");
