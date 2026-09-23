@@ -52,6 +52,7 @@ fn collapsed_with_divergent_posteriors() -> CollapsedOut {
         mu_residual: None,
         gamma: None,
         delta: None,
+        stats_kept: true,
     }
 }
 

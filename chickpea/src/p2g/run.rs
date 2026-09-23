@@ -39,7 +39,7 @@ pub struct PeakToGeneArgs {
     batch_files: Option<Vec<Box<str>>>,
 
     /// Shared cell QC (on by default; `--no-qc` to disable). MAD outliers +
-    /// near-empty floor, with optional `--qc-auto-cutoff` 2-means cell calling
+    /// near-empty floor, with optional `--qc-auto-cutoff` trough cell calling
     /// (`--qc-histogram` to show the nnz distribution). Dropped cells are
     /// removed from BOTH modalities up front, before projection / collapse.
     #[command(flatten)]
@@ -240,7 +240,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     (`stack[0]`), NOT the pooled RNA+ATAC nnz: a cell with deep ATAC but no gene
     expression must not survive on its ATAC depth. RNA and ATAC share identical
     cell columns (validated at load), so the RNA `train_keep` masks BOTH layers.
-    `--qc-auto-cutoff` adds 2-means cell calling; `--qc-histogram` prints the
+    `--qc-auto-cutoff` adds trough cell calling; `--qc-histogram` prints the
     nnz distribution. */
     if let Some(cfg) = args.qc.to_config() {
         let report = data_beans::qc_lib::compute_qc(&paired.data_stack.stack[0], &cfg, None)?;
