@@ -14,6 +14,7 @@ pub mod peak_foldin;
 pub mod run;
 pub mod tracks;
 pub mod two_track;
+pub mod workflow;
 
 mod embed;
 mod finemap;
