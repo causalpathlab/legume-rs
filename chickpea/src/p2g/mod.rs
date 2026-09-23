@@ -9,6 +9,7 @@
 pub mod cis;
 pub mod gene_track;
 pub mod run;
+pub mod tracks;
 
 mod embed;
 mod finemap;
