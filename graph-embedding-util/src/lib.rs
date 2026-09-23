@@ -51,7 +51,7 @@ pub use eval::{
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
-    fit, validate_offset_rank, warm_start_module_labels, CellEncoders, FeatureModuleArgs,
+    fit, partition_modules, validate_offset_rank, CellEncoders, FeatureModuleArgs,
     FeatureModuleConfig, FitConfig, FitOutput, ParentModulesOwned, TrackEncoder, TrackInfo,
     TrackSpec,
 };

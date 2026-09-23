@@ -256,6 +256,11 @@ pub struct FitConfig {
     pub hier_units_per_step: usize,
     /// Hierarchical phase 1: modules drawn per unit per step for the gene-level term.
     pub hier_modules_per_unit: usize,
+    /// On a modality-tagged (multiome), one-track axis, a modality with at
+    /// least this many feature rows is **module-only**: its modules are its
+    /// own (the warm start's, fixed), and its features carry no residual — a
+    /// feature's row is its module's row. `0` turns it off.
+    pub module_only_min_rows: usize,
     /// Gene modules. The hierarchical phase 1 reads only `n_modules` and
     /// `parent`: `M` sizes its hard gene partition and a parent seeds it
     /// (`senna update`). The remaining fields configure the learned mixed-

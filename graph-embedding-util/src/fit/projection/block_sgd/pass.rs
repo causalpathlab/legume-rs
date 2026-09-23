@@ -226,9 +226,6 @@ impl PassDict {
 /// against. The dictionary half is [`PassDict`].
 pub(super) struct PassSpec<'a> {
     pub(super) edges: &'a EdgeTable,
-    /// Warm start for the latent (host, `[n_kept × h]`); `None` starts at the
-    /// null model. The intercept starts at its exact conditional MLE either way.
-    pub(super) init_theta: Option<&'a [f32]>,
     /// Adam step cap per block; the pass's learning-rate decay spans it.
     pub(super) max_steps: usize,
 }

@@ -345,7 +345,8 @@ fn one_track_project(fx: &OneTrackFixture) -> (Vec<f32>, Vec<f32>) {
         levels: &levels,
         seed: 20_260_914,
     };
-    let (out, encs) = project_cells(&input, &cells, None, &spec, &TrackSpec::base(D)).unwrap();
+    let (out, encs) =
+        project_cells(&input, &cells, None, &spec, &TrackSpec::base(D), None).unwrap();
     // One count track, so exactly one encoder — the file `senna bge` persists.
     assert_eq!(encs.iter().len(), 1);
     assert!(encs.single().is_some());
@@ -354,59 +355,55 @@ fn one_track_project(fx: &OneTrackFixture) -> (Vec<f32>, Vec<f32>) {
 
 /// The parity guard for the one-track (`senna bge`) path.
 ///
-/// The numbers below were taken from `project_cells` on this same fixture with
-/// the code as it stood BEFORE the per-track rewrite (single `FrozenDict::new`,
-/// one `PooledGeneEncoder`, the single-dictionary `refine`), as the mean of six
-/// runs of that build.
+/// The numbers below were taken from `project_cells` on this same fixture —
+/// the encoder's placement with the intercept exact at it, no per-cell solve
+/// after it — as the mean of six runs, one process each.
 ///
-/// The bar is 5e-4, not exact, and the reason is not this change: the global
-/// gradient-norm clip sums the per-parameter squares in `GradStore`'s hash-map
-/// order, which differs between processes, so the clip factor — and through
-/// fifty epochs of SGD, the answer — moves run to run *within one build*. That
-/// spread was measured at 1.6e-4 (max over six runs, values spanning ±0.7);
-/// with the clip disabled the same six runs agreed to the bit. The snapshot is
-/// the mean of those six, so 5e-4 sits ~6x above the worst deviation from it —
-/// and 3x BELOW what the smallest real change reaches: re-seeding track 0 off
-/// `spec.seed` already moves θ[0] by 1.5e-3.
+/// The bar is 5e-4, not exact: the global gradient-norm clip sums the
+/// per-parameter squares in `GradStore`'s hash-map order, which differs between
+/// processes, so the clip factor — and through the refinement, the answer — can
+/// move run to run *within one build*. The six runs behind the snapshot agreed
+/// far inside the bar, and re-seeding track 0 off `spec.seed` moves θ[0] by
+/// well over it.
 #[test]
 fn one_track_project_cells_matches_the_previous_output() {
     #[rustfmt::skip]
     const THETA: [f32; FIX_CELLS * H] = [
-        0.415465, 0.197483, -0.161280, 0.078608, -0.070422, -0.702394,
-        -0.063581, 0.142593, -0.038534, -0.014298, 0.412886, -0.173098,
-        0.476744, 0.466121, -0.258836, -0.060034, 0.114163, -0.579790,
-        -0.146075, 0.122002, -0.215837, -0.081836, 0.543518, -0.141621,
-        0.475339, 0.658283, 0.029077, -0.128021, -0.089705, -0.554376,
-        0.117690, 0.223137, -0.175178, -0.081836, 0.543518, -0.141621,
-        0.367344, 0.404782, 0.024488, -0.157214, -0.021566, -0.422413,
-        -0.105511, -0.046066, -0.146974, -0.023166, 0.671513, 0.102777,
-        0.281262, 0.153771, 0.129035, -0.028430, 0.150919, -0.146246,
-        -0.125012, -0.150155, -0.096700, -0.077601, 0.598665, 0.044016,
-        0.281262, 0.153771, 0.129035, -0.051901, 0.027350, -0.086648,
-        -0.172001, -0.210862, 0.017108, 0.014058, 0.489938, 0.191971,
-        0.058501, -0.273539, 0.102896, -0.228285, -0.289475, -0.047525,
-        -0.436371, -0.619823, 0.004610, 0.036538, 0.425799, 0.300043,
-        0.152790, -0.070007, 0.132742, -0.228285, -0.289475, -0.047525,
-        -0.390827, -0.619072, 0.108628, -0.138582, 0.256469, 0.350371,
-        0.152790, -0.070007, 0.132742, -0.145479, -0.621181, -0.065321,
-        -0.078132, -0.393741, 0.370869, -0.061412, -0.040242, 0.364270,
-        0.240890, -0.278171, 0.189121, -0.126900, -0.525292, -0.106238,
-        -0.078132, -0.393741, 0.370869, 0.025259, 0.004374, 0.515326,
-        0.386110, -0.158149, 0.036904, -0.270283, -0.519122, -0.176567,
-        0.037664, -0.239856, 0.496499, -0.006318, 0.013277, 0.200861,
-        0.199471, -0.157492, -0.053043, -0.137731, -0.414818, -0.338569,
-        -0.148210, -0.225632, 0.331219, -0.006318, 0.013277, 0.200861,
+        0.203109, -0.107541, -0.157314, 0.058433, -0.086704, -0.152246,
+        -0.045752, 0.085753, 0.015765, -0.041326, 0.176028, -0.036660,
+        0.267939, -0.087062, -0.182925, -0.042972, -0.019994, -0.176514,
+        -0.092915, 0.123936, -0.005518, -0.110193, 0.279293, 0.002435,
+        0.265573, -0.143911, -0.158012, -0.065789, -0.076130, -0.149596,
+        0.020219, 0.033865, -0.057489, -0.110193, 0.279293, 0.002435,
+        0.194284, -0.131810, -0.127327, -0.076847, -0.010759, -0.093634,
+        -0.038931, 0.031786, -0.009169, -0.077517, 0.295738, 0.015932,
+        0.085314, -0.109521, -0.066885, -0.051909, 0.071052, -0.047744,
+        -0.032488, 0.015211, 0.018998, -0.070097, 0.266701, 0.016663,
+        0.085314, -0.109521, -0.066885, -0.057143, 0.030019, -0.030547,
+        -0.063254, -0.002902, 0.119968, -0.030610, 0.238321, 0.028054,
+        0.042879, -0.045137, -0.017436, -0.045018, -0.025343, 0.031198,
+        -0.089959, -0.099387, 0.170223, -0.023186, 0.219146, 0.025290,
+        0.043764, -0.066149, -0.046222, -0.045018, -0.025343, 0.031198,
+        -0.092799, -0.135982, 0.186704, -0.068617, 0.196431, 0.028556,
+        0.043764, -0.066149, -0.046222, -0.006413, -0.065482, 0.052580,
+        -0.022780, -0.145474, 0.204507, -0.042115, 0.042647, 0.124450,
+        0.081346, -0.078643, -0.011180, -0.002283, -0.054526, 0.030870,
+        -0.022780, -0.145474, 0.204507, -0.014857, -0.005274, 0.159811,
+        0.120790, -0.088061, -0.165305, -0.037615, -0.076657, 0.019209,
+        -0.003736, -0.126952, 0.181781, -0.005667, -0.014257, 0.058296,
+        0.085639, -0.045470, -0.133344, -0.021665, -0.069696, -0.042657,
+        -0.040255, -0.105655, 0.193101, -0.005667, -0.014257, 0.058296,
     ];
     #[rustfmt::skip]
     const B_CELL: [f32; FIX_CELLS] = [
-        0.365279, 0.347813, 0.495867, 0.326731, 0.382886, 0.417894,
-        0.409558, 0.415506, 0.274180, 0.497274, 0.432204, 0.415506,
-        0.377130, 0.455120, 0.435345, 0.297668, 0.328201, 0.365830,
-        0.498418, 0.298518, 0.328201, 0.441726, 0.367414, 0.348246,
-        0.231170, 0.358406, 0.224674, 0.426644, 0.168407, 0.358406,
-        0.288082, 0.279452, 0.168407, 0.259073, 0.246233, 0.219340,
-        0.140509, 0.203507, 0.246233, 0.281543, 0.151683, 0.268983,
-        0.253660, 0.383563, 0.243059, 0.282474, 0.273670, 0.383563,
+        0.375882, 0.442689, 0.501585, 0.364092, 0.433011, 0.492288,
+        0.430064, 0.467982, 0.302100, 0.553641, 0.445128, 0.467982,
+        0.379358, 0.496944, 0.443856, 0.347053, 0.317504, 0.372328,
+        0.507619, 0.352778, 0.317504, 0.440672, 0.383090, 0.363420,
+        0.244760, 0.383526, 0.311893, 0.431103, 0.163324, 0.383526,
+        0.379372, 0.294358, 0.163324, 0.319245, 0.314993, 0.240584,
+        0.166783, 0.244607, 0.314993, 0.318938, 0.154058, 0.316019,
+        0.317954, 0.387527, 0.236552, 0.314083, 0.315606, 0.387527,
     ];
     let (theta, b_cell) = one_track_project(&one_track_fixture());
     assert_eq!(theta.len(), THETA.len());
@@ -840,14 +837,14 @@ fn one_count_track_beside_a_non_count_track_does_not_take_the_one_track_shortcut
         levels: &levels,
         seed: 20_260_914,
     };
-    let (out, encs) = project_cells(&input, &cells, None, &distill_spec, &spec).unwrap();
+    let (out, encs) = project_cells(&input, &cells, None, &distill_spec, &spec, None).unwrap();
     // Exactly one encoder, on the count track's rows alone.
     assert_eq!(encs.iter().len(), 1);
     assert_eq!(encs.iter()[0].rows, spec.rows_of_track(0));
     assert_eq!(out.theta.len(), FIX_CELLS * H);
     assert!(out.theta.iter().all(|v| v.is_finite()));
     assert!(out.b_cell.iter().all(|v| v.is_finite()));
-    // The non-count track got its own intercept from the polish.
+    // The non-count track gets its own intercept, exact at the cell's θ.
     assert_eq!(out.other_intercepts.len(), 1);
     assert_eq!(out.other_intercepts[0].len(), FIX_CELLS);
 }
@@ -940,5 +937,194 @@ fn load_refuses_a_path_list_that_is_not_exactly_the_count_tracks() {
     );
     for (_, p) in &paths {
         std::fs::remove_file(p).ok();
+    }
+}
+
+/// The refinement step is a dense `[step × D]` block with a backward pass, so
+/// it answers to the same activation budget as every other phase-2 block: an
+/// ordinary axis keeps the full step, a very wide one (a multiome axis with
+/// every peak) shrinks it instead of running the device out of memory.
+#[test]
+fn refine_step_answers_to_the_block_budget() {
+    assert_eq!(refine_cells_per_step(30_000), REFINE_CELLS_PER_STEP);
+    let wide = 2_000_000;
+    let step = refine_cells_per_step(wide);
+    assert!(
+        step < REFINE_CELLS_PER_STEP,
+        "step {step} on {wide} features"
+    );
+    assert_eq!(step, block_sgd::block_cells(wide));
+    assert!(refine_cells_per_step(usize::MAX / 1024) >= 1);
+}
+
+/// Phase 2 on a collapsed axis. Every cell's intercept is the FULL axis'
+/// closed form at its `θ` (the collapse is exact for the likelihood), and the
+/// saved encoder, which carries the collapse, places the run's own full-axis
+/// cells where phase 2 put them: one estimator, both halves.
+#[test]
+fn phase_2_on_a_collapsed_axis_is_exact_on_the_full_axis() {
+    let dev = Device::Cpu;
+    let mut fx = one_track_fixture();
+    // Rows 6..9 and 9..12 are module-only: each module's rows share one row.
+    let module_only: Vec<bool> = (0..D).map(|g| g >= 6).collect();
+    let labels: Vec<u32> = (0..D as u32)
+        .map(|g| match g {
+            0..6 => g,
+            6..9 => 6,
+            _ => 7,
+        })
+        .collect();
+    for g in 6..D {
+        let src = if g < 9 { 6 } else { 9 };
+        for k in 0..H {
+            fx.feat[g * H + k] = fx.feat[src * H + k];
+        }
+    }
+    let collapse = RowCollapse::from_modules(&module_only, &labels).unwrap();
+    assert_eq!(collapse.n_rows, 8);
+
+    let cells: Vec<(u32, &[u32], &[f32])> = fx
+        .edges
+        .iter()
+        .enumerate()
+        .map(|(i, (f, c))| (i as u32, f.as_slice(), c.as_slice()))
+        .collect();
+    let input = Phase2Input {
+        feat: &fx.feat,
+        b_feat: &fx.b_feat,
+        h: H,
+        n_cells: FIX_CELLS,
+        lambda: 1.0,
+        dev: &dev,
+        label: "Phase 2",
+        gauge_fix: true,
+    };
+    let levels = vec![DistillLevel {
+        e_pb: &fx.e_pb,
+        cell_to_pb: &fx.cell_to_pb,
+    }];
+    let spec = DistillSpec {
+        levels: &levels,
+        seed: 20_260_922,
+    };
+    let (out, encs) = project_cells(
+        &input,
+        &cells,
+        None,
+        &spec,
+        &TrackSpec::base(D),
+        Some(&collapse),
+    )
+    .unwrap();
+    assert_eq!(out.theta.len(), FIX_CELLS * H);
+    let tm = &out.gauge.theta_mean;
+    let theta = |i: usize| -> Vec<f32> { (0..H).map(|k| out.theta[i * H + k] + tm[k]).collect() };
+
+    for (i, (_, counts)) in fx.edges.iter().enumerate() {
+        let th = theta(i);
+        let scores: Vec<f64> = (0..D)
+            .map(|g| {
+                let s: f32 = (0..H).map(|k| th[k] * fx.feat[g * H + k]).sum::<f32>() + fx.b_feat[g];
+                f64::from(s)
+            })
+            .collect();
+        let mx = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lse = mx + scores.iter().map(|s| (s - mx).exp()).sum::<f64>().ln();
+        let n: f64 = counts.iter().map(|&c| f64::from(c)).sum();
+        let want = n.ln() - lse;
+        assert!(
+            (f64::from(out.b_cell[i]) - want).abs() < 1e-4,
+            "cell {i}: intercept {} vs the full axis' {want}",
+            out.b_cell[i]
+        );
+    }
+
+    let enc = encs.single().expect("one count track, one encoder");
+    let path = std::env::temp_dir().join(format!(
+        "cell_enc_phase2_collapsed_{}.safetensors",
+        std::process::id()
+    ));
+    let path = path.to_string_lossy().to_string();
+    enc.save(&path).unwrap();
+    let again = CellEncoder::load(&fx.feat, &fx.b_feat, H, &path, &dev).unwrap();
+    std::fs::remove_file(&path).ok();
+    let placed = again.encode_edges(&cells).unwrap();
+    for i in 0..FIX_CELLS {
+        for (k, want) in theta(i).into_iter().enumerate() {
+            let got = placed.theta[i * H + k];
+            assert!(
+                (got - want).abs() < 1e-5,
+                "cell {i} θ[{k}]: {got} vs phase 2's {want}"
+            );
+        }
+    }
+}
+
+/// An encoder trained on the collapsed axis, saved with its row map and
+/// reloaded against the FULL dictionary, places full-axis cells exactly as the
+/// in-memory encoder places the same cells already collapsed.
+#[test]
+fn a_collapsed_encoder_round_trips_onto_the_full_axis() {
+    let dev = Device::Cpu;
+    // Full axis: rows 0, 1 residual; rows 2..6 module-only in two modules.
+    let module_only = [false, false, true, true, true, true];
+    let labels = [0u32, 1, 5, 5, 7, 7];
+    let collapse = RowCollapse::from_modules(&module_only, &labels).unwrap();
+    let h = 3;
+    let mut feat = vec![0f32; 6 * h];
+    for (g, row) in feat.chunks_mut(h).enumerate() {
+        let src = if module_only[g] {
+            labels[g] as usize
+        } else {
+            g
+        };
+        for (k, x) in row.iter_mut().enumerate() {
+            *x = ((src * 5 + k * 3) % 7) as f32 * 0.1 - 0.3;
+        }
+    }
+    let b = vec![0.2f32, -0.1, -1.0, -0.4, -0.7, -1.3];
+    let (rf, rb) = collapse.reduce_dictionary(&feat, &b, h);
+    let mean_red = vec![1.0f32; collapse.n_rows];
+    let mut enc =
+        CellEncoder::build(FrozenDict::new(&rf, &rb, h, &dev).unwrap(), &mean_red, &dev).unwrap();
+    enc.collapse = Some(collapse.clone());
+
+    let path = std::env::temp_dir().join(format!(
+        "cell_enc_collapsed_{}.safetensors",
+        std::process::id()
+    ));
+    let path = path.to_string_lossy().to_string();
+    enc.save(&path).unwrap();
+    let again = CellEncoder::load(&feat, &b, h, &path, &dev).unwrap();
+    std::fs::remove_file(&path).ok();
+
+    // Full-axis cells through the reloaded encoder …
+    let cells: Vec<(Vec<u32>, Vec<f32>)> = vec![
+        (vec![0, 2, 3, 5], vec![2.0, 1.0, 4.0, 3.0]),
+        (vec![1, 4], vec![5.0, 1.0]),
+    ];
+    let full: Vec<(u32, &[u32], &[f32])> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, (f, c))| (i as u32, f.as_slice(), c.as_slice()))
+        .collect();
+    let a = again.encode_edges(&full).unwrap();
+    // … match the same cells collapsed by hand through the in-memory encoder.
+    let reduced: Vec<(Vec<u32>, Vec<f32>)> = cells
+        .iter()
+        .map(|(f, c)| collapse.reduce_edges(f, c))
+        .collect();
+    let red: Vec<(u32, &[u32], &[f32])> = reduced
+        .iter()
+        .enumerate()
+        .map(|(i, (f, c))| (i as u32, f.as_slice(), c.as_slice()))
+        .collect();
+    enc.collapse = None;
+    let bx = enc.encode_edges(&red).unwrap();
+    for (x, y) in a.theta.iter().zip(&bx.theta) {
+        assert!((x - y).abs() < 1e-5, "θ {x} vs {y}");
+    }
+    for (x, y) in a.b_node.iter().zip(&bx.b_node) {
+        assert!((x - y).abs() < 1e-5, "intercept {x} vs {y}");
     }
 }

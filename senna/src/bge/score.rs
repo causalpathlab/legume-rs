@@ -25,7 +25,7 @@ use anyhow::Context;
 use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{
-    CellEncoder, CellEncoders, FrozenProjection, FrozenProjectionArgs, FrozenProjector, TrackSpec,
+    CellEncoder, CellEncoders, FrozenProjection, FrozenProjectionArgs, FrozenProjector,
     PROJECTION_RIDGE_SGD,
 };
 use graph_embedding_util::loss::{multinomial_ll, FrozenSide, NodeTerm};
@@ -367,24 +367,21 @@ impl BgeEmbedding {
         // the null normalizer, the learning rate — happens once, here, instead of on
         // every projection call.
         // The run's own estimator when it has one: the distilled encoder places
-        // the query and the SGD polishes it from there, exactly as the run's
-        // cells were placed. Without one the SGD solves from the null model.
+        // the query exactly as the run's cells were placed. Without one the SGD
+        // solves from the null model.
         //
         // gem's axis carries tracks, so its encoder set is loaded through
         // `CellEncoders` instead of the single-dictionary `CellEncoder`:
         // `encode_edges` means over whichever count tracks a cell has counts
         // on. `self.cell_encoder` (track 0's file) gates both arms the same
-        // way it always has — no file, no warm start, straight to the SGD.
+        // way it always has — no file, no encoder, straight to the SGD.
         let cell_encoder = self
             .cell_encoder
             .as_deref()
             .filter(|_| self.tracks.is_none())
             .map(|path| CellEncoder::load(&self.rho, &self.b_feat, self.h, path, dev))
             .transpose()?;
-        // Built once and kept alive alongside `track_encoders`: `CellEncoders::load`
-        // needs a `&TrackSpec` to build against, and `QueryProjector::Tracks`'s own
-        // polish step (`FrozenProjector::polish_tracks`) needs the SAME spec again,
-        // so it is computed here rather than inline at either call site.
+        // `CellEncoders::load` builds the encoder set against the run's track spec.
         let track_spec = self
             .tracks
             .as_ref()
@@ -416,9 +413,9 @@ impl BgeEmbedding {
         let mut pass = project_all(ProjectAll {
             data_vec: &data_vec,
             remap: &remap.new_to_train,
-            projector: match (&track_encoders, &track_spec, cell_encoder.as_ref()) {
-                (Some(encs), Some(spec), _) => QueryProjector::Tracks(encs, &projector, spec),
-                (None, _, Some(enc)) => QueryProjector::Encoder(enc, &projector),
+            projector: match (&track_encoders, cell_encoder.as_ref()) {
+                (Some(encs), _) => QueryProjector::Tracks(encs),
+                (None, Some(enc)) => QueryProjector::Encoder(enc),
                 _ => QueryProjector::Sgd(&projector),
             },
             side: &side,
@@ -578,30 +575,24 @@ impl BgeEmbedding {
 }
 
 /// What places a group of query cells on the dictionary: the run's encoder
-/// followed by the SGD polish when the run has one, the block SGD from the null
+/// when it has one — exactly how phase 2 placed the run's own cells, `θ` from
+/// the encoder and the intercept exact at it — the block SGD from the null
 /// model otherwise (and always on a union axis the encoder was not trained on).
 enum QueryProjector<'a> {
     Sgd(&'a FrozenProjector<'a>),
-    Encoder(&'a CellEncoder, &'a FrozenProjector<'a>),
-    /// gem's per-track encoder set: the warm start means over whichever count
+    Encoder(&'a CellEncoder),
+    /// gem's per-track encoder set: `θ` is the mean over whichever count
     /// tracks a cell has counts on (`CellEncoders::encode_edges`) instead of
-    /// reading one dictionary, and the polish is
-    /// [`FrozenProjector::polish_tracks`] — the SAME per-track Poisson
-    /// partitions and intercepts phase 2 itself polished these tracks with
-    /// (Task 4a), not the single-partition pass `Encoder` uses. The
-    /// `TrackSpec` is the same one `CellEncoders::load` built the encoder set
-    /// against.
-    Tracks(&'a CellEncoders, &'a FrozenProjector<'a>, &'a TrackSpec),
+    /// reading one dictionary.
+    Tracks(&'a CellEncoders),
 }
 
 impl QueryProjector<'_> {
     fn group_nodes(&self) -> usize {
         match self {
             Self::Sgd(p) => p.group_nodes(),
-            // The polish cuts blocks on the SGD's rhythm; the encoder's own block is
-            // no larger, so grouping here keeps both block-aligned.
-            Self::Encoder(e, p) => e.group_nodes().min(p.group_nodes()),
-            Self::Tracks(e, p, _) => e.group_nodes().min(p.group_nodes()),
+            Self::Encoder(e) => e.group_nodes(),
+            Self::Tracks(e) => e.group_nodes(),
         }
     }
 
@@ -617,17 +608,13 @@ impl QueryProjector<'_> {
                 (j as u32, feat, count)
             })
             .collect();
-        match self {
-            Self::Sgd(p) => p.project(&nodes, group.len(), bar),
-            Self::Encoder(e, p) => {
-                let warm = e.encode_edges(&nodes)?;
-                p.polish(&nodes, &warm.theta, bar)
-            }
-            Self::Tracks(e, p, tracks) => {
-                let warm = e.encode_edges(&nodes)?;
-                p.polish_tracks(&nodes, &warm.theta, tracks, bar)
-            }
-        }
+        let placed = match self {
+            Self::Sgd(p) => return p.project(&nodes, group.len(), bar),
+            Self::Encoder(e) => e.encode_edges(&nodes)?,
+            Self::Tracks(e) => e.encode_edges(&nodes)?,
+        };
+        bar.inc(group.len() as u64);
+        Ok(placed)
     }
 }
 

@@ -573,6 +573,8 @@ pub fn load_unified_data(args: LoadUnifiedArgs) -> anyhow::Result<UnifiedData> {
         column_alignment,
         per_file_feature_suffix: per_file_feature_suffix.clone(),
         per_file_barcode_suffix,
+        // Condition labels are read one per input column, in file order.
+        keep_empty_barcodes: condition_files.is_some(),
         ..Default::default()
     })?;
 

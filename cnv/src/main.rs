@@ -326,6 +326,9 @@ fn run_infercnv(args: &InferCnvArgs) -> anyhow::Result<()> {
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: files,
         preload: args.preload,
+        // The reference/query split below is positional per file, and every
+        // query cell gets a profile.
+        keep_empty_barcodes: true,
         ..Default::default()
     })?;
     let data = loaded.data;

@@ -53,7 +53,11 @@ pub struct FeatureModuleArgs {
                      row, so nothing that reads it has to know modules exist.\n\
                      senna bge reads M as the size of a HARD feature partition for its exact\n\
                      two-level softmax in phase 1 and writes neither table; the mixed-membership\n\
-                     layer above is what pinto cage trains."
+                     layer above is what pinto cage trains. Its partition is built once from\n\
+                     the finest pseudobulks' counts and fixed for the run: features with no\n\
+                     grouping evidence share one background module, the rest are grouped by\n\
+                     their residual profiles.\n\
+                     Under --multiome, each modality is partitioned on its own into M modules."
     )]
     pub feature_modules: Option<usize>,
 }
