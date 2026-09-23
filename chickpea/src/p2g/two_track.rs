@@ -97,9 +97,9 @@ pub fn embed_two_track(
     inp: &TwoTrackInput,
     cfg: &TwoTrackConfig,
 ) -> anyhow::Result<TwoTrackEmbedding> {
-    ////////////////////////////////////////
+    //////////////////////////////////////////
     // Peaks onto genes, once, then on disk //
-    ////////////////////////////////////////
+    //////////////////////////////////////////
     let rna = open_sparse_matrix_by_path(inp.rna_file)?;
     let gene_names = rna.row_names()?;
     anyhow::ensure!(
