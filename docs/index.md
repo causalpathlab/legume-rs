@@ -28,17 +28,21 @@ make install
 Alternatively, you can install individual binaries:
 
 ```sh
-cargo install --path data-beans
+cargo install data-beans
+cargo install faba
 cargo install --path senna
 cargo install --path pinto
 cargo install --path cocoa
-cargo install --path faba
 ```
 
 ## Tools
 
 ### data-beans
 Basic utility functions for processing sparse matrices from single-cell omics data.
+
+### faba
+**FABA**: Feature statistics Accumulator for Base-pair-level Analysis — lives in
+[`causalpathlab/faba`](https://github.com/causalpathlab/faba) (`cargo install faba`).
 
 ### senna
 **SENNA**: Stochastic data Embedding with Nearest Neighbourhood Adjustment - embedding and dimensionality reduction tools.
@@ -48,9 +52,6 @@ Basic utility functions for processing sparse matrices from single-cell omics da
 
 ### cocoa
 **CoCoA**: Counterfactual Confounder Adjustment for Differential Analysis - confounder adjustment methods.
-
-### faba
-**FABA**: Feature statistics Accumulator for Base-pair-level Analysis - genomic feature extraction tools.
 
 ## Documentation
 

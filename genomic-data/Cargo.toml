@@ -1,12 +1,18 @@
 [package]
-name = "genomic-data"
+name = "legume-genomic-types"
 license.workspace = true
 authors.workspace = true
-description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 version = "0.4.0"
+description = "Shared genomic types and parsers (GFF/GTF, BED, SAM utilities) for legume-rs tools"
+readme = "README.md"
+rust-version.workspace = true
+
+[lib]
+name = "genomic_data"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
