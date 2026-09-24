@@ -17,9 +17,10 @@ mod setup;
 
 pub use batch_fold::BatchGeneFold;
 pub use config::{
-    validate_offset_rank, FeatureModuleConfig, FitConfig, FitOutput, ParentModulesOwned, TrackInfo,
-    TrackSpec,
+    validate_offset_rank, FeatureModuleConfig, FitConfig, FitOutput, MultiomeOptions,
+    ParentModulesOwned, TrackInfo, TrackSpec,
 };
+pub use hier::{CisGateReadout, CisGates};
 pub use module_args::FeatureModuleArgs;
 pub use module_partition::{parent_module_logits, partition_modules};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
@@ -227,21 +228,65 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         _ => None,
     };
     let mut module_only: Vec<bool> = Vec::new();
+    // Per module, its modality, and whether it is a background of near-empty
+    // or scattered features: set only on the modality-pure partition below.
+    let mut module_group: Vec<u32> = Vec::new();
+    let mut background_modules: Vec<bool> = Vec::new();
     let (labels, n_modules) = if let Some((modality, flags)) = &module_only_plan {
         let (counts, sizes) = finest_counts()?;
         module_only = modality.iter().map(|&k| flags[k as usize]).collect();
         // One group per modality, every modality with the same module count.
         let n_modalities = flags.len();
-        let (labels, n) = module_partition::partition_modules_by_group(
+        let opts = config.multiome.clone().unwrap_or_default();
+        let min_size: Vec<usize> = flags
+            .iter()
+            .map(|&mo| {
+                if mo {
+                    opts.module_only_min_size
+                } else {
+                    opts.residual_min_size
+                }
+            })
+            .collect();
+        let part = module_partition::partition_modules_by_group(
             &counts,
             &sizes,
             modality,
             &vec![n_per_modality; n_modalities],
+            &min_size,
+            opts.feature_block.as_deref(),
             config.seed,
         )?;
+        // A background of flat or scattered features has no gene level: its
+        // rows go module-only, on residual modalities too.
+        let n_scattered = merge_module_only(
+            &mut module_only,
+            Some(module_partition::background_rows(
+                &part.labels,
+                &part.background,
+            )),
+        );
+        background_modules = part.background;
+        let (labels, n) = (part.labels, part.n_modules);
+        if opts.modality_intercepts {
+            // `partition_modules_by_group` numbers modality `k`'s modules
+            // `k·n_per_modality ..`.
+            module_group = (0..n).map(|m| (m / n_per_modality) as u32).collect();
+        }
+        let n_bg = n_scattered
+            + merge_module_only(
+                &mut module_only,
+                module_partition::flat_module_only(
+                    &counts,
+                    &sizes,
+                    &tracks,
+                    config.flat_module_only,
+                ),
+            );
         info!(
             "Phase 1 (hier) — modality-pure modules: {n_per_modality} per modality, {n} in \
-             total; module-only modalities {:?} ({} features)",
+             total; module-only modalities {:?} ({} features); {n_bg} flat or scattered \
+             feature(s) of residual modalities also module-only",
             flags
                 .iter()
                 .enumerate()
@@ -277,17 +322,29 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             }
             None => {
                 let (counts, sizes) = finest_counts()?;
-                (
-                    // The partition is over GENES, so it reads the base track's
-                    // rows re-keyed by gene; identity on one track.
-                    module_partition::partition_modules(
-                        &module_partition::base_track_profile(&counts, &tracks),
-                        &sizes,
-                        n_per_modality,
-                        config.seed,
-                    )?,
+                let labels = module_partition::partition_modules(
+                    &module_partition::base_track_profile(&counts, &tracks),
+                    &sizes,
                     n_per_modality,
-                )
+                    config.seed,
+                )?;
+                if let Some(flags) = module_partition::flat_module_only(
+                    &counts,
+                    &sizes,
+                    &tracks,
+                    config.flat_module_only,
+                ) {
+                    module_only = vec![false; n_features];
+                    merge_module_only(&mut module_only, Some(flags));
+                }
+                let n_bg = module_only.iter().filter(|&&b| b).count();
+                if n_bg > 0 {
+                    info!(
+                        "Phase 1 (hier) — {n_bg} flat feature(s) are module-only \
+                         (no gene-level residual)"
+                    );
+                }
+                (labels, n_per_modality)
             }
         }
     };
@@ -307,6 +364,9 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             offset_rank: config.offset_rank,
             device: config.device.clone(),
             module_only: module_only.clone(),
+            cis_gates: config.cis_gates.clone(),
+            module_group,
+            background_modules,
         },
         config.preset_features.as_ref(),
         &config.preset_offsets,
@@ -479,5 +539,22 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_encoder: phase2.cell_encoder,
         // One fitted intercept per NON-base track; empty on a one-track axis.
         track_intercepts: phase2.other_intercepts,
+        module_labels: out.labels,
+        cis_gates: out.cis,
     })
+}
+
+/// OR `extra` into `module_only`; returns how many rows it newly flipped.
+fn merge_module_only(module_only: &mut [bool], extra: Option<Vec<bool>>) -> usize {
+    let Some(extra) = extra else {
+        return 0;
+    };
+    let mut n = 0usize;
+    for (m, e) in module_only.iter_mut().zip(extra) {
+        if e && !*m {
+            *m = true;
+            n += 1;
+        }
+    }
+    n
 }

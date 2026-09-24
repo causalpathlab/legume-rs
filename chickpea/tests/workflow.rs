@@ -1,9 +1,7 @@
-//! The whole link workflow on the planted fixture: embed, fold peaks in,
-//! train the attention, and write every table.
+//! The whole link workflow on the planted fixture.
 
 mod common;
 
-use chickpea::p2g::attention::AttentionConfig;
 use chickpea::p2g::two_track::{TwoTrackConfig, TwoTrackInput};
 use chickpea::p2g::workflow::{run_links, LinkConfig};
 use common::{gene_positions, kernel, write_fixture, N_CELLS, N_GENES, PEAKS_PER_GENE};
@@ -20,12 +18,8 @@ fn small() -> LinkConfig {
             proj_dim: 8,
             feature_modules: 4,
             phase1_cells_per_pb: 4,
+            module_only_min_rows: 30,
             ..TwoTrackConfig::default()
-        },
-        attention: AttentionConfig {
-            rank: 4,
-            epochs: 50,
-            ..AttentionConfig::default()
         },
         ..LinkConfig::default()
     }
@@ -46,18 +40,27 @@ fn the_workflow_writes_consistent_tables() {
         work_prefix: &out,
     };
     let summary = run_links(&input, &small(), None).unwrap();
-    let n_pairs = N_GENES * PEAKS_PER_GENE;
-    assert_eq!(summary.n_pairs, n_pairs);
+    // Pairs to near-empty or scattered peaks are dropped, never added.
+    let n_pairs = summary.n_pairs;
+    assert!(
+        n_pairs > 0 && n_pairs <= N_GENES * PEAKS_PER_GENE,
+        "{n_pairs} pairs"
+    );
     assert!(summary.n_clusters >= 2, "{} clusters", summary.n_clusters);
     assert!(
-        summary.attention_loss.last() < summary.attention_loss.first(),
-        "attention loss did not fall: {:?}",
-        summary.attention_loss
+        summary.gamma2.is_finite() && summary.gamma2 > 0.0,
+        "γ2 should stay warm: γ1={} γ2={}",
+        summary.gamma1,
+        summary.gamma2
     );
+    assert!(summary.theta0.is_finite(), "θ0={}", summary.theta0);
+    // The gates train: the shared scalars leave their start (θ₀ = 1, θ₃ = ½, γ₁ = 0.01).
+    let moved =
+        (summary.theta0 - 1.0).abs() + (summary.theta3 - 0.5).abs() + (summary.gamma1 - 0.01).abs();
+    assert!(moved > 1e-3, "the gates never moved: {summary:?}");
 
     for stem in [
         "gene_embedding",
-        "gene_atac_embedding",
         "cell_embedding",
         "cell_clusters",
         "peak_embedding",
@@ -69,38 +72,38 @@ fn the_workflow_writes_consistent_tables() {
         assert!(std::path::Path::new(&f).exists(), "missing {f}");
     }
 
-    // One row per pair; attention and ABC shares each sum to 1 per gene.
     let links = format!("{out}.links.parquet");
     let (s, n) =
-        read_table_columns(&links, &["gene", "peak"], &["distance", "abc", "attention"]).unwrap();
+        read_table_columns(&links, &["gene", "peak"], &["distance", "abc", "gate"]).unwrap();
     assert_eq!(s[0].len(), n_pairs);
-    let mut per_gene: HashMap<&str, (f64, f64)> = HashMap::new();
+    let mut per_gene: HashMap<&str, f64> = HashMap::new();
     for (i, g) in s[0].iter().enumerate() {
-        let e = per_gene.entry(g).or_default();
-        e.0 += n[1][i];
-        e.1 += n[2][i];
+        *per_gene.entry(g).or_default() += n[1][i];
+        assert!(n[2][i] >= 0.0, "gate weight negative");
     }
-    assert_eq!(per_gene.len(), N_GENES);
-    for (g, (abc, att)) in per_gene {
+    assert!(!per_gene.is_empty() && per_gene.len() <= N_GENES);
+    for (g, abc) in per_gene {
         assert!((abc - 1.0).abs() < 1e-5, "{g}: ABC sums to {abc}");
-        assert!((att - 1.0).abs() < 1e-5, "{g}: attention sums to {att}");
     }
 
-    // Per cluster: shares sum to 1 per gene within each cluster.
+    // Per cluster: ABC (and renormalised gate) shares sum to 1 per gene.
     let by = format!("{out}.links_by_cluster.parquet");
-    let (s, n) = read_table_columns(&by, &["gene", "cluster"], &["attention", "abc"]).unwrap();
-    let mut per: HashMap<(&str, &str), (f64, f64)> = HashMap::new();
-    for i in 0..s[0].len() {
-        let e = per.entry((&s[0][i], &s[1][i])).or_default();
-        e.0 += n[0][i];
-        e.1 += n[1][i];
+    let (_, n) = read_table_columns(&by, &[], &["gene_idx", "cluster", "gate", "abc"]).unwrap();
+    let mut per: HashMap<(i32, i32), (f64, f64)> = HashMap::new();
+    for (((&g, &k), &gate), &abc) in n[0].iter().zip(&n[1]).zip(&n[2]).zip(&n[3]) {
+        let e = per.entry((g as i32, k as i32)).or_default();
+        e.0 += gate;
+        e.1 += abc;
     }
-    for ((g, k), (att, abc)) in per {
+    for ((g, k), (gate, abc)) in per {
         assert!(
-            (att - 1.0).abs() < 1e-4,
-            "{g} in {k}: attention sums to {att}"
+            (gate - 1.0).abs() < 1e-4,
+            "gene {g} in cluster {k}: gate shares sum to {gate}"
         );
-        assert!((abc - 1.0).abs() < 1e-4, "{g} in {k}: ABC sums to {abc}");
+        assert!(
+            (abc - 1.0).abs() < 1e-4,
+            "gene {g} in cluster {k}: ABC sums to {abc}"
+        );
     }
 
     let (cells, _) = read_table_columns(
@@ -112,8 +115,6 @@ fn the_workflow_writes_consistent_tables() {
     assert_eq!(cells[0].len(), N_CELLS);
 }
 
-/// Cells that fail QC still inform the embedding, but no written cell table,
-/// cluster or accessibility rate includes them.
 #[test]
 fn qc_failed_cells_are_left_out_of_every_cell_output() {
     let dir = tempfile::tempdir().unwrap();

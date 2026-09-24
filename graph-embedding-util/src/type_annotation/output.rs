@@ -323,7 +323,7 @@ pub(super) fn log_label_histogram(res: &AnnotateProjOutputs) {
         *counts.entry(res.coarse_names[kk].as_ref()).or_insert(0) += 1;
     }
     let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|a| std::cmp::Reverse(a.1));
     info!(
         "annotation summary ({} cells, {} communities → {} coarse labels):",
         res.n_cells,

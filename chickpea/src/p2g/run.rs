@@ -1,7 +1,6 @@
 //! `peak-to-gene` CLI arguments and the run.
 
 use crate::common::*;
-use crate::p2g::attention::AttentionConfig;
 use crate::p2g::cis::AbcKernel;
 use crate::p2g::input::load_gene_coords_tsv;
 use crate::p2g::two_track::{TwoTrackConfig, TwoTrackInput};
@@ -53,21 +52,13 @@ pub struct PeakToGeneArgs {
     )]
     max_cis: usize,
 
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Initial contact exponent γ in (d + c)^-γ"
-    )]
+    #[arg(long, default_value_t = 1.0, help = "Contact exponent γ in (d + c)^-γ")]
     contact_gamma: f32,
 
-    #[arg(
-        long,
-        default_value_t = 5000.0,
-        help = "Initial contact pseudocount c (bp)"
-    )]
+    #[arg(long, default_value_t = 5000.0, help = "Contact pseudocount c (bp)")]
     contact_pseudocount: f32,
 
-    /* Two-track gene embedding */
+    /* Multiome embedding (bge multiome recipe) */
     #[arg(long, default_value_t = 128, help = "Embedding dimension")]
     embedding_dim: usize,
 
@@ -87,7 +78,11 @@ pub struct PeakToGeneArgs {
     #[arg(long, default_value_t = 50, help = "Random projection dimension")]
     proj_dim: usize,
 
-    #[arg(long, default_value_t = 128, help = "Gene modules for the softmax")]
+    #[arg(
+        long,
+        default_value_t = 1024,
+        help = "Modules per modality (RNA and ATAC)"
+    )]
     feature_modules: usize,
 
     #[arg(
@@ -99,27 +94,16 @@ pub struct PeakToGeneArgs {
 
     #[arg(
         long,
-        default_value_t = 16,
-        help = "Rank of the peak-aggregated track's gene offset"
+        default_value_t = 100_000,
+        help = "ATAC modality is module-only when it has at least this many peaks (0 = off)"
     )]
-    offset_rank: usize,
+    module_only_min_rows: usize,
 
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Ridge pulling a gene's ATAC row toward its RNA row"
-    )]
-    offset_l2: f32,
+    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
+    device: ComputeDevice,
 
-    /* Localized attention */
-    #[arg(long, default_value_t = 16, help = "Rank of the attention content map")]
-    attention_rank: usize,
-
-    #[arg(long, default_value_t = 100, help = "Attention epochs")]
-    attention_epochs: usize,
-
-    #[arg(long, default_value_t = 0.01, help = "Attention learning rate")]
-    attention_lr: f64,
+    #[arg(long, default_value_t = 0, help = "Device index (CUDA/Metal)")]
+    device_no: usize,
 
     /* Clusters, seed, output */
     #[arg(
@@ -151,8 +135,6 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
         gene_names.len()
     );
 
-    // RNA-driven cell QC: a cell with deep ATAC but no expression must not pass
-    // on its ATAC depth.
     let keep: Option<FxHashSet<Box<str>>> = match args.qc.to_config() {
         Some(cfg) => {
             let barcodes = rna.column_names()?;
@@ -193,19 +175,10 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             proj_dim: args.proj_dim,
             feature_modules: args.feature_modules,
             phase1_cells_per_pb: args.phase1_cells_per_pb,
-            offset_rank: args.offset_rank,
-            offset_l2: args.offset_l2,
+            module_only_min_rows: args.module_only_min_rows,
             seed: args.seed,
-            ..TwoTrackConfig::default()
-        },
-        attention: AttentionConfig {
-            rank: args.attention_rank,
-            epochs: args.attention_epochs,
-            learning_rate: args.attention_lr,
-            seed: args.seed,
-            init_gamma: f64::from(args.contact_gamma),
-            init_pseudocount: f64::from(args.contact_pseudocount),
-            ..AttentionConfig::default()
+            device: args.device.clone(),
+            device_no: args.device_no,
         },
         n_clusters: args.n_clusters,
         ..LinkConfig::default()

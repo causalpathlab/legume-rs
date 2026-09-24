@@ -122,7 +122,7 @@ fn grouping_by_relation_keeps_every_edge_with_its_weight_and_reports_the_blocks(
         .zip(e.weight.as_ref().unwrap())
         .map(|(&l, &w)| (l, w))
         .collect();
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs.sort_by_key(|a| a.0);
     assert_eq!(
         pairs,
         vec![(0, 0.1), (1, 0.2), (2, 0.3), (3, 0.4), (4, 0.5)]

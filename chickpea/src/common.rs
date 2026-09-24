@@ -28,6 +28,26 @@ pub enum ComputeDevice {
     Metal,
 }
 
+impl std::fmt::Display for ComputeDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ComputeDevice::Cpu => "cpu",
+            ComputeDevice::Cuda => "cuda",
+            ComputeDevice::Metal => "metal",
+        })
+    }
+}
+
+impl ComputeDevice {
+    pub fn to_device(&self, device_no: usize) -> anyhow::Result<candle_core::Device> {
+        Ok(match self {
+            ComputeDevice::Cpu => candle_core::Device::Cpu,
+            ComputeDevice::Cuda => candle_core::Device::new_cuda(device_no)?,
+            ComputeDevice::Metal => candle_core::Device::new_metal(device_no)?,
+        })
+    }
+}
+
 pub use legume_numeric::matrix::common_io::{mkdir_parent, remove_file};
 pub use legume_numeric::matrix::traits::*;
 pub use legume_numeric::param::traits::TwoStatParam;
