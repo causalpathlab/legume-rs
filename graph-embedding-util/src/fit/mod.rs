@@ -364,6 +364,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             modules_per_unit: config.hier_modules_per_unit,
             lr: config.learning_rate as f32,
             weight_decay: config.weight_decay as f32,
+            unit_weight_decay: config.unit_weight_decay.unwrap_or(config.weight_decay) as f32,
             seed: config.seed,
             offset_l2: config.offset_l2,
             offset_rank: config.offset_rank,

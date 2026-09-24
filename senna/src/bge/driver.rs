@@ -214,6 +214,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             device: knobs.device.to_device(knobs.device_no)?,
             block_size: knobs.block_size,
             weight_decay: knobs.weight_decay,
+            unit_weight_decay: None,
             phase1_cells_per_pb: knobs.phase1_cells_per_pb,
             hier_units_per_step: knobs.batch_size.unwrap_or(256),
             hier_modules_per_unit: knobs.modules_per_unit,

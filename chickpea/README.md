@@ -90,6 +90,7 @@ Key options (see `chickpea peak-to-gene --help` for all):
 | `--contact-gamma`, `--contact-pseudocount` | 1, 5000 | ABC contact `(d + c)^-γ` |
 | `--mix` | 0.5 | share of each gene's score taken from its cis peaks (0 = exact likelihood) |
 | `--align-weight` | 0.1 | weight of the gene-to-cis-peak alignment per unit (0 = off) |
+| `--weight-decay` | 1e-4 | L2 decay on the gene and peak embedding rows, never the pseudobulks (0 = off) |
 | `--embedding-dim` | 128 | embedding dimension |
 | `--epochs` | 1000 | embedding epochs |
 | `--feature-modules` | 1024 | RNA gene modules |

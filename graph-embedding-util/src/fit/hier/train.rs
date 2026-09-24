@@ -30,7 +30,10 @@ pub struct HierConfig {
     pub units_per_step: usize,
     pub modules_per_unit: usize,
     pub lr: f32,
+    /// Decay on the feature rows (`μ`, `r`); see [`super::step::apply`].
     pub weight_decay: f32,
+    /// Decay on the unit rows `e_u` (pseudobulks and phase-1 cells).
+    pub unit_weight_decay: f32,
     pub seed: u64,
     /// Ridge on the non-base tracks' offset tables (see [`super::step`]), as a
     /// PER-EPOCH weight: one step carries `1 / steps_per_epoch` of it (see
@@ -517,7 +520,14 @@ pub fn train(
                     merge_grads(&mut grads, &loss.backward()?)?;
                 }
             }
-            apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
+            apply(
+                &mut params,
+                &mut opt,
+                &grads,
+                cfg.lr,
+                cfg.weight_decay,
+                cfg.unit_weight_decay,
+            )?;
             acc.loss_module += stats.loss_module;
             acc.loss_gene += stats.loss_gene;
             acc.loss_ridge += stats.loss_ridge;

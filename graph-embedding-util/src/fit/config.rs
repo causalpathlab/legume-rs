@@ -239,6 +239,10 @@ pub struct FitConfig {
     /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
     /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
     pub weight_decay: f64,
+    /// The same decay on phase 1's unit rows (pseudobulks and phase-1 cells)
+    /// alone; `None` takes [`Self::weight_decay`]. `Some(0.0)` decays the
+    /// feature rows only.
+    pub unit_weight_decay: Option<f64>,
     /// Phase-1 cell-axis mode (`k`). Controls only what shapes `E_feat` in
     /// phase 1; phase 2 always analytically projects *every* cell against the
     /// fixed feature side, so the full per-cell embedding is unaffected.
