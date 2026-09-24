@@ -314,7 +314,7 @@ pub struct MultiomeOptions {
     /// On a module-only modality, modules of fewer features than this hold
     /// scattered features: they join the modality's background, and the freed
     /// slots split the largest modules (see
-    /// [`crate::fit::module_partition::partition_modules_min_size`]). The
+    /// [`data_beans::alg::feature_coarsening::partition_features`]). The
     /// background is then no cis candidate. `0` keeps the plain partition.
     pub module_only_min_size: usize,
     /// The same on a residual modality (singletons at `2`); the background's
