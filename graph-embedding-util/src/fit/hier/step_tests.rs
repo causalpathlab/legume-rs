@@ -488,7 +488,7 @@ fn twenty_steps_on_the_full_plan_lower_the_loss() {
     for _ in 0..20 {
         let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, 0.0);
         let grads = loss.backward().unwrap();
-        apply(&mut p, &mut opt, &grads, 0.2, 0.0).unwrap();
+        apply(&mut p, &mut opt, &grads, 0.2, 0.0, 0.0).unwrap();
     }
     let after = total(&p, &units, &um, &part, &sup, &plan, 0.0).0;
     assert!(after < before * 0.9, "{before} → {after}");
@@ -517,7 +517,7 @@ fn weight_decay_shrinks_touched_rows_only_and_never_the_offsets() {
     let v0 = to_host(p.offsets[0].d_r.v.as_tensor()).unwrap();
     let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, OFFSET_L2);
     let grads = loss.backward().unwrap();
-    apply(&mut p, &mut opt, &grads, 0.5, 0.2).unwrap();
+    apply(&mut p, &mut opt, &grads, 0.5, 0.2, 0.2).unwrap();
     let h = p.h;
     let r1 = to_host(p.r.as_tensor()).unwrap();
     for g in [0usize, 2, 3, 5, 6] {
@@ -554,6 +554,38 @@ fn weight_decay_shrinks_touched_rows_only_and_never_the_offsets() {
     }
 }
 
+/// The units' decay is its own: at zero a touched unit row keeps its value
+/// while the feature rows the same step touched still decay.
+#[test]
+fn unit_rows_can_be_spared_the_feature_decay() {
+    let (units, part, um, sup, mut p) = fixture_tracks();
+    let plan = StepPlan {
+        units: vec![0, 1, 2],
+        pairs_by_module: vec![((0, 0), vec![(0, 1.0), (1, 1.0), (2, 1.0)])],
+    };
+    let mut opt = Optimizers::new(&p, 1e-7).unwrap();
+    let r0 = to_host(p.r.as_tensor()).unwrap();
+    let e0 = to_host(p.e_u.as_tensor()).unwrap();
+    let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, 0.0);
+    let grads = loss.backward().unwrap();
+    apply(&mut p, &mut opt, &grads, 0.5, 0.2, 0.0).unwrap();
+    let h = p.h;
+    let e1 = to_host(p.e_u.as_tensor()).unwrap();
+    for (a, b) in e1[..3 * h].iter().zip(&e0[..3 * h]) {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "a touched unit row decayed: {b} → {a}"
+        );
+    }
+    let r1 = to_host(p.r.as_tensor()).unwrap();
+    for k in 0..h {
+        assert!(
+            (r1[k] - 0.9 * r0[k]).abs() < 1e-5,
+            "the touched gene row 0 still decays"
+        );
+    }
+}
+
 /// A pinned row takes no step, its bias does, and only the modules holding a
 /// pinned row stay put.
 #[test]
@@ -573,7 +605,7 @@ fn pinned_rows_hold_while_their_biases_train() {
     for _ in 0..5 {
         let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, 0.0);
         let grads = loss.backward().unwrap();
-        apply(&mut p, &mut opt, &grads, 0.2, 0.01).unwrap();
+        apply(&mut p, &mut opt, &grads, 0.2, 0.01, 0.01).unwrap();
     }
     let h = p.h;
     let r1 = to_host(p.r.as_tensor()).unwrap();
@@ -660,7 +692,7 @@ fn the_gene_offset_stays_low_rank_and_a_pinned_offset_base_holds() {
     for _ in 0..5 {
         let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, OFFSET_L2);
         let grads = loss.backward().unwrap();
-        apply(&mut p, &mut opt, &grads, 0.2, 0.0).unwrap();
+        apply(&mut p, &mut opt, &grads, 0.2, 0.0, 0.0).unwrap();
     }
     let delta = nalgebra::DMatrix::<f32>::from_row_slice(7, 2, &p.offsets[0].delta_host().unwrap());
     let sv = delta.singular_values();
@@ -699,7 +731,7 @@ fn the_gene_offset_stays_low_rank_and_a_pinned_offset_base_holds() {
     for _ in 0..5 {
         let (_, loss) = total(&q, &units, &um, &part, &sup, &plan, OFFSET_L2);
         let grads = loss.backward().unwrap();
-        apply(&mut q, &mut opt, &grads, 0.2, 0.0).unwrap();
+        apply(&mut q, &mut opt, &grads, 0.2, 0.0, 0.0).unwrap();
     }
     let h = q.h;
     let delta = q.offsets[0].delta_host().unwrap();

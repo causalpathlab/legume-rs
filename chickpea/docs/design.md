@@ -50,6 +50,13 @@ gap   = mean_g var_u(ρ_ug − ã_ug)                    added as align_weight �
   ATAC:RNA count split is not written into the embedding. `β` alone is not
   identified (a direction shared by one modality's module rows is another
   intercept), so `μ` is held centred within each modality.
+- **L2 decay** (`--weight-decay`, default 1e-4): every feature row a phase-1
+  step touches — each modality's module and gene rows — shrinks by
+  `1 − lr·wd` before its update. Directions the units never vary in carry no
+  gradient to hold them, so they decay instead of keeping their random
+  start. The pseudobulk and unit rows and the biases never decay. Keep it
+  light: at 0.1 (with the pseudobulk rows decaying too) it separated the
+  modalities again and lowered the cell embedding's rank.
 
 ## How it is computed
 

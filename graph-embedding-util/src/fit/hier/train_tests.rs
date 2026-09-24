@@ -23,6 +23,7 @@ fn cfg() -> HierConfig {
         modules_per_unit: 2,
         lr: 0.1,
         weight_decay: 0.0,
+        unit_weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
         offset_rank: 2,

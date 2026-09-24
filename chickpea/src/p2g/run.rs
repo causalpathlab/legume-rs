@@ -101,6 +101,18 @@ pub struct PeakToGeneArgs {
     #[arg(long, default_value_t = 50, help = "Random projection dimension")]
     proj_dim: usize,
 
+    #[arg(
+        long,
+        default_value_t = 1e-4,
+        help = "L2 weight decay on the gene and peak embeddings",
+        long_help = "L2 weight decay on the gene and peak embeddings.\n\
+                     Every feature row a phase-1 step touches — each modality's\n\
+                     module and gene rows — shrinks by 1 − lr·wd before its\n\
+                     update, so directions the data never pins down decay.\n\
+                     The pseudobulk rows and biases never decay. 0 turns it off."
+    )]
+    weight_decay: f64,
+
     #[arg(long, default_value_t = 1024, help = "RNA gene modules")]
     feature_modules: usize,
 
@@ -208,6 +220,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             module_only_min_rows: args.module_only_min_rows,
             align_weight: args.align_weight,
             mix: args.mix,
+            weight_decay: args.weight_decay,
             seed: args.seed,
             device: args.device.clone(),
             device_no: args.device_no,

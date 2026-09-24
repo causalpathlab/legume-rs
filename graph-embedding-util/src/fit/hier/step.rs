@@ -584,8 +584,9 @@ impl Optimizers {
     }
 }
 
-/// Apply the gradients of one step with the row optimizers. Weight decay `wd`
-/// multiplies a touched row by `1 − lr·wd` before its Adagrad step; biases
+/// Apply the gradients of one step with the row optimizers. Weight decay
+/// multiplies a touched row by `1 − lr·wd` before its Adagrad step: `wd` on
+/// the feature rows (`μ`, `r`), `wd_units` on the unit rows `e_u`. Biases
 /// never decay, pinned rows never move, and the offset tables never decay at
 /// all — their shrinkage is the exact ridge already in the gradient. A table
 /// the loss never reached takes no step.
@@ -595,17 +596,21 @@ pub fn apply(
     grads: &GradStore,
     lr: f32,
     wd: f32,
+    wd_units: f32,
 ) -> CResult<()> {
-    let decay = if wd > 0.0 {
-        1.0 - f64::from(lr) * f64::from(wd)
-    } else {
-        1.0
+    let factor_of = |wd: f32| {
+        if wd > 0.0 {
+            1.0 - f64::from(lr) * f64::from(wd)
+        } else {
+            1.0
+        }
     };
+    let (decay, decay_units) = (factor_of(wd), factor_of(wd_units));
     if let Some(g) = grads.get(&params.e_u) {
         let row_sq = g.sqr()?.sum(1)?;
-        if decay != 1.0 {
+        if decay_units != 1.0 {
             let touched = row_sq.gt(0f32)?.to_dtype(DType::F32)?;
-            let factor = touched.affine(decay - 1.0, 1.0)?.unsqueeze(1)?;
+            let factor = touched.affine(decay_units - 1.0, 1.0)?.unsqueeze(1)?;
             params
                 .e_u
                 .set(&params.e_u.as_tensor().broadcast_mul(&factor)?)?;
