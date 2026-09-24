@@ -55,12 +55,14 @@
 //! passes (`HierConfig::offset_l2 / steps_per_epoch`, see
 //! [`super::train::per_step_offset_l2`]).
 
+use super::cis_gates::{CisGateParams, CisMix};
 use super::params::HierParams;
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::units::UnitTable;
 use legume_numeric::candle::candle_core::backprop::GradStore;
 use legume_numeric::candle::candle_core::{DType, Result as CResult, Tensor, Var, D};
 use legume_numeric::candle::candle_nn::ops::log_softmax;
+use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use legume_numeric::candle::convert::{add_into, to_1d};
 use legume_numeric::candle::fast_index::gather_rows;
 use legume_numeric::candle::lora::PinnedLoraOpt;
@@ -161,9 +163,12 @@ fn module_level(
         mu_eff = gather_rows(&mu_eff, &m_ids)?;
         b_eff = gather_rows(&b_eff, &m_ids)?;
     }
-    let s = e_b
+    let mut s = e_b
         .matmul(&mu_eff.t()?)?
         .broadcast_add(&b_eff.unsqueeze(0)?)?;
+    if let Some(gi) = params.group.as_ref() {
+        s = (s + gi.scores(&to_1d(&plan.units, dev)?, mods)?)?;
+    }
     let logp = log_softmax(&s, D::Minus1)?;
     (wq * logp)?.sum_all()?.neg()
 }
@@ -290,6 +295,7 @@ fn score_gene_batches(
     params: &HierParams,
     batches: &[GeneBatch],
     t: usize,
+    cis: Option<&CisMix>,
 ) -> CResult<Option<Tensor>> {
     let dev = &params.dev;
     let h = params.h;
@@ -311,6 +317,10 @@ fn score_gene_batches(
         if let Some(l) = params.lora.as_ref() {
             r = (r + l.gene.residual_rows(&g_ids)?)?;
         }
+        // The cis mix is a change of gene row and bias (see `cis_gates`).
+        if let Some(mix) = cis {
+            (r, bias) = mix.gene_rows(&g_ids, &r, &bias)?;
+        }
         let r = r.reshape((p_n, b.d_max, h))?;
         let pad = additive_pad_mask(&to_1d(&b.col_valid, dev)?.reshape((p_n, 1, b.d_max))?)?;
         let s = e
@@ -327,14 +337,52 @@ fn score_gene_batches(
     Ok(total)
 }
 
+/// The module table the step scores (`μ`, plus the LoRA module residual) and
+/// the cis genes' residual rows as the gene level composes them (`r`, plus
+/// the LoRA gene residual): the pool's `ρ_g = μ_{m(g)} + r_g` is the gene
+/// level's own row.
+fn cis_tables(params: &HierParams, cis: &CisGateParams) -> CResult<(Tensor, Tensor)> {
+    let ids = cis.compact_feat();
+    let mut mu = params.mu.as_tensor().clone();
+    let mut r_c = gather_rows(params.r.as_tensor(), ids)?;
+    if let Some(l) = params.lora.as_ref() {
+        mu = (mu + l.module.residual()?)?;
+        r_c = (r_c + l.gene.residual_rows(ids)?)?;
+    }
+    Ok((mu, r_c))
+}
+
+/// The step's cis mix, in the graph of the current tables; `None` without
+/// gates. Built once per step (see [`step_loss`]).
+pub fn cis_mix(params: &HierParams) -> CResult<Option<CisMix>> {
+    let Some(cis) = params.cis.as_ref() else {
+        return Ok(None);
+    };
+    let (mu, r_c) = cis_tables(params, cis)?;
+    cis.mix(&mu, params.b_m.as_tensor(), &r_c).map(Some)
+}
+
+/// Trained θ, γ and pair weights; `None` without gates.
+pub fn cis_readout(params: &HierParams) -> CResult<Option<super::cis_gates::CisGateReadout>> {
+    let Some(cis) = params.cis.as_ref() else {
+        return Ok(None);
+    };
+    let (mu, r_c) = cis_tables(params, cis)?;
+    cis.readout(&mu, params.b_m.as_tensor(), &r_c).map(Some)
+}
+
 /// The step's loss as one tensor to differentiate, plus its parts as numbers
 /// for the epoch log. Pure in the parameters: nothing is updated here.
+///
+/// `cis` is the step's cis mix (see [`cis_mix`]), built by the caller once
+/// per step so the slices of a threaded step share it; `None` without gates.
 pub fn step_loss(
     params: &HierParams,
     ctx: &StepCtx<'_>,
     plan: &StepPlan,
     offset_l2_step: f32,
     lora_ridge_step: f32,
+    cis: Option<&CisMix>,
 ) -> anyhow::Result<(StepStats, Tensor)> {
     let n_t = ctx.units.n_tracks();
     anyhow::ensure!(
@@ -356,7 +404,9 @@ pub fn step_loss(
             module_level(params, ctx, plan, &e_b, mu_lora.as_ref(), t)?,
         )?;
         let batches = build_gene_batches(ctx, plan, t);
-        if let Some(l) = score_gene_batches(params, &batches, t)? {
+        // Cis gates live on a one-track axis: the base track is the RNA one.
+        let mix = if t == 0 { cis } else { None };
+        if let Some(l) = score_gene_batches(params, &batches, t, mix)? {
             add_into(&mut loss_gene, l)?;
         }
     }
@@ -414,6 +464,11 @@ pub struct Optimizers {
     pub offsets: Vec<(RowAdagrad, RowAdagrad, PinnedLoraOpt)>,
     /// Under LoRA: the module residual's pair, then the gene residual's.
     pub lora: Option<[PinnedLoraOpt; 2]>,
+    /// The cis gates' shared scalars (θ, γ): Adam, so their step does not
+    /// scale with a loss summed over every unit and pair of the step.
+    pub cis: Option<AdamW>,
+    /// The per-unit group intercepts, one row per unit like `e_u`.
+    pub group: Option<RowAdagrad>,
 }
 
 impl Optimizers {
@@ -445,6 +500,21 @@ impl Optimizers {
                     l.module.optimizers(lr, l.lr_ratio, dev)?,
                     l.gene.optimizers(lr, l.lr_ratio, dev)?,
                 ]),
+                None => None,
+            },
+            cis: match params.cis.as_ref() {
+                Some(c) => Some(AdamW::new(
+                    c.vars(),
+                    ParamsAdamW {
+                        lr,
+                        weight_decay: 0.0,
+                        ..ParamsAdamW::default()
+                    },
+                )?),
+                None => None,
+            },
+            group: match params.group.as_ref() {
+                Some(_) => Some(RowAdagrad::new(n_u, lr, dev)?),
                 None => None,
             },
         })
@@ -525,6 +595,16 @@ pub fn apply(
     if let (Some(l), Some([opt_m, opt_g])) = (params.lora.as_ref(), opt.lora.as_mut()) {
         l.module.step(opt_m, grads)?;
         l.gene.step(opt_g, grads)?;
+    }
+    if let Some(o) = opt.cis.as_mut() {
+        o.step(grads)?;
+    }
+    if let (Some(gi), Some(o)) = (params.group.as_ref(), opt.group.as_mut()) {
+        if let Some(g) = grads.get(&gi.beta) {
+            o.step(&gi.beta, g)?;
+        }
+        // Back onto `Σ_{m ∈ k} μ_m = 0` after the `μ` step.
+        gi.centre(&params.mu)?;
     }
     Ok(())
 }

@@ -2,11 +2,15 @@
 //! per unit ∝ its share, one [`step`] per chunk of units; the composed
 //! dictionary at the end.
 
-use super::params::{HierParams, PresetGenes, PresetMode, PresetOffsets};
+use super::cis_gates::CisMix;
+use super::params::{GroupIntercepts, HierParams, PresetGenes, PresetMode, PresetOffsets};
 use super::partition::{Partition, TrackSupport, UnitModules};
-use super::step::{apply, step_loss, Optimizers, StepCtx, StepPlan, StepStats};
+use super::step::{
+    apply, cis_mix, cis_readout, step_loss, Optimizers, StepCtx, StepPlan, StepStats,
+};
 use super::units::UnitTable;
 use crate::progress::new_progress_bar;
+use legume_numeric::candle::candle_core::backprop::GradStore;
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::candle::convert::to_host;
 use legume_numeric::matrix::rand_util::mix_seed;
@@ -14,7 +18,7 @@ use log::info;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +50,15 @@ pub struct HierConfig {
     /// warm start's and does not move. Every module must hold only one kind.
     /// Empty when there are none.
     pub module_only: Vec<bool>,
+    /// Optional cis gates mixed into RNA gene-level scores (chickpea).
+    pub cis_gates: Option<super::cis_gates::CisGates>,
+    /// Per module, its group (a modality on a multiome axis): with two or more
+    /// groups every unit gets one intercept per non-reference group on its
+    /// module scores (see [`super::params::GroupIntercepts`]). Empty for none.
+    pub module_group: Vec<u32>,
+    /// Per module, `true` for a background of near-empty or scattered
+    /// features: cis pairs whose peak sits there are dropped. Empty for none.
+    pub background_modules: Vec<bool>,
 }
 
 pub struct HierOutput {
@@ -60,24 +73,48 @@ pub struct HierOutput {
     pub final_loss_per_unit: f64,
     /// The module of every gene (the input labels).
     pub labels: Vec<u32>,
+    /// Trained cis gates (shared θ, γ + pair `w`), when configured.
+    pub cis: Option<super::cis_gates::CisGateReadout>,
+    /// `[n_units, K − 1]` per-unit group intercepts, when
+    /// [`HierConfig::module_group`] named two or more groups.
+    pub group_intercepts: Option<DMatrix<f32>>,
+}
+
+/// A `(unit, track)`'s module draw: `q` restricted to the modules with a gene
+/// level, and the unit's share of counts on them.
+pub(crate) struct ModulePicker {
+    pick: WeightedIndex<f64>,
+    /// `Σ_{m with a gene level} q_um`: each draw's weight carries it, so the
+    /// draws stay an unbiased estimator of `Σ_m q_um·L₂(u, m)` (a module-only
+    /// module's `L₂` is zero).
+    share: f32,
 }
 
 /// One module picker per `(unit, TRACK)`, indexed `u * T + t` — the layout
 /// [`UnitModules::idx`] already uses, so chunking `q` by `n_m` walks the pairs
 /// in that order. Built once: a unit's composition never changes during
-/// training. `None` for a (unit, track) with no counts.
-pub(crate) fn module_pickers(um: &UnitModules, n_m: usize) -> Vec<Option<WeightedIndex<f64>>> {
+/// training. Modules flagged in `skip` (module-only: no gene level) are never
+/// drawn — a draw there would be dropped by the step. `None` for a (unit,
+/// track) with no counts off the skipped modules. `skip` may be empty.
+pub(crate) fn module_pickers(
+    um: &UnitModules,
+    n_m: usize,
+    skip: &[bool],
+) -> Vec<Option<ModulePicker>> {
     debug_assert_eq!(um.n_modules, n_m, "picker chunk width is the module count");
+    let kept = |m: usize| !skip.get(m).copied().unwrap_or(false);
     um.q.chunks_exact(n_m)
         .map(|q| {
-            if q.iter().all(|&x| x == 0.0) {
-                None
-            } else {
-                Some(
-                    WeightedIndex::new(q.iter().map(|&x| f64::from(x)))
-                        .expect("non-negative, not all zero"),
-                )
-            }
+            let w: Vec<f64> = q
+                .iter()
+                .enumerate()
+                .map(|(m, &x)| if kept(m) { f64::from(x) } else { 0.0 })
+                .collect();
+            let share: f64 = w.iter().sum();
+            (share > 0.0).then(|| ModulePicker {
+                pick: WeightedIndex::new(w).expect("non-negative, not all zero"),
+                share: share as f32,
+            })
         })
         .collect()
 }
@@ -93,17 +130,18 @@ pub(crate) fn per_step_offset_l2(offset_l2: f32, steps_per_epoch: usize) -> f32 
     offset_l2 / steps_per_epoch.max(1) as f32
 }
 
-/// Draw `k` modules for each unit in `chunk` ∝ its composition `q_u·`, with
-/// replacement, and emit one `(unit, weight)` pair per distinct module drawn,
-/// weight = draw multiplicity / `k`. Weights for a unit sum to 1 across the
-/// modules it lands in, so this is an unbiased estimator of the exhaustive
-/// per-module sum — never dedup-and-drop the multiplicity. A unit with an
-/// all-zero composition draws no modules, so it has no gene-level pairs; it
-/// stays in `plan.units`, where its module-level term is exactly zero because
-/// its weight (∝ total^½) is zero.
+/// Draw `k` modules for each unit in `chunk` ∝ its composition `q_u·` over the
+/// modules with a gene level, with replacement, and emit one `(unit, weight)`
+/// pair per distinct module drawn, weight = share · draw multiplicity / `k`
+/// (share = the unit's count share on those modules, see [`ModulePicker`]).
+/// Weights for a unit sum to that share across the modules it lands in, so
+/// this is an unbiased estimator of the exhaustive per-module sum — never
+/// dedup-and-drop the multiplicity. A unit with no counts on such modules
+/// draws none, so it has no gene-level pairs; it stays in `plan.units` for its
+/// module-level term.
 pub(crate) fn draw_plan(
     chunk: &[u32],
-    pickers: &[Option<WeightedIndex<f64>>],
+    pickers: &[Option<ModulePicker>],
     n_m: usize,
     n_t: usize,
     k: usize,
@@ -123,11 +161,12 @@ pub(crate) fn draw_plan(
             };
             counts.iter_mut().for_each(|c| *c = 0);
             for _ in 0..k {
-                counts[picker.sample(rng)] += 1;
+                counts[picker.pick.sample(rng)] += 1;
             }
+            let per_draw = picker.share * inv_k;
             for (m, &c) in counts.iter().enumerate() {
                 if c > 0 {
-                    by_module[t * n_m + m].push((u, c as f32 * inv_k));
+                    by_module[t * n_m + m].push((u, c as f32 * per_draw));
                 }
             }
         }
@@ -141,6 +180,101 @@ pub(crate) fn draw_plan(
             .map(|(k, us)| (((k / n_m) as u32, (k % n_m) as u32), us))
             .collect(),
     }
+}
+
+/// Threads a step is split over: the machine's parallelism **on the CPU**,
+/// and one everywhere else.
+///
+/// Candle SGD/backprop still runs on `cfg.device` either way — CUDA/Metal
+/// kernels stay on that device. Slicing only pays where slices land on
+/// different *host* arithmetic units. A GPU issues kernels on one stream, so
+/// multi-slice launches serialize and add contention (measured ~10× slower on
+/// CUDA at 16 slices); the CPU's elementwise/reduction ops are single-threaded
+/// and do want the split.
+fn step_threads(dev: &Device) -> usize {
+    if dev.is_cpu() {
+        std::thread::available_parallelism().map_or(1, usize::from)
+    } else {
+        1
+    }
+}
+
+/// Fewest units a thread's slice of a step should hold.
+const MIN_UNITS_PER_SLICE: usize = 4;
+
+/// One step's loss and gradient over `chunk`, as up to `n_threads` slices of
+/// disjoint units solved on their own threads: each slice draws its own
+/// modules from an rng seeded off the step's rng (seeds taken in slice
+/// order), builds its loss with `loss_of`, runs its own backward, and the
+/// slices' gradients are summed. Exact, since the loss is a sum over units.
+pub(crate) fn step_grads<F>(
+    chunk: &[u32],
+    n_threads: usize,
+    rng: &mut StdRng,
+    loss_of: &F,
+) -> anyhow::Result<(StepStats, GradStore)>
+where
+    F: Fn(&[u32], &mut StdRng) -> anyhow::Result<(StepStats, Tensor)> + Sync,
+{
+    let n_slices = (chunk.len() / MIN_UNITS_PER_SLICE).clamp(1, n_threads.max(1));
+    let per_slice = chunk.len().div_ceil(n_slices).max(1);
+    let slices: Vec<(&[u32], u64)> = chunk
+        .chunks(per_slice)
+        .map(|s| (s, rng.next_u64()))
+        .collect();
+    let results: Vec<anyhow::Result<(StepStats, GradStore)>> = if slices.len() == 1 {
+        let (slice, seed) = slices[0];
+        vec![slice_grads(slice, seed, loss_of)]
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = slices
+                .iter()
+                .map(|&(slice, seed)| scope.spawn(move || slice_grads(slice, seed, loss_of)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a step slice panicked"))
+                .collect()
+        })
+    };
+    let mut stats = StepStats::default();
+    let mut grads: Option<GradStore> = None;
+    for r in results {
+        let (s, g) = r?;
+        stats.loss_module += s.loss_module;
+        stats.loss_gene += s.loss_gene;
+        stats.loss_ridge += s.loss_ridge;
+        grads = Some(match grads {
+            None => g,
+            Some(mut acc) => {
+                merge_grads(&mut acc, &g)?;
+                acc
+            }
+        });
+    }
+    Ok((stats, grads.expect("at least one slice")))
+}
+
+fn slice_grads<F>(slice: &[u32], seed: u64, loss_of: &F) -> anyhow::Result<(StepStats, GradStore)>
+where
+    F: Fn(&[u32], &mut StdRng) -> anyhow::Result<(StepStats, Tensor)>,
+{
+    let mut rng = StdRng::seed_from_u64(seed);
+    let (stats, loss) = loss_of(slice, &mut rng)?;
+    Ok((stats, loss.backward()?))
+}
+
+/// `into += from`, id by id; an id only `from` has is copied over.
+fn merge_grads(into: &mut GradStore, from: &GradStore) -> anyhow::Result<()> {
+    for &id in from.get_ids() {
+        let g = from.get_id(id).expect("listed id");
+        let sum = match into.get_id(id) {
+            Some(a) => (a + g)?,
+            None => g.clone(),
+        };
+        into.insert_id(id, sum);
+    }
+    Ok(())
 }
 
 pub fn train(
@@ -230,9 +364,70 @@ pub fn train(
             mo.summary(&um, &part),
         );
     }
+    if let Some(cis) = &cfg.cis_gates {
+        cis.validate(n_features)?;
+        anyhow::ensure!(
+            n_t == 1,
+            "cis gates need a one-track (multiome) feature axis"
+        );
+        let mut resolved = cis.with_peak_modules(&part.module_of);
+        if let Some(mo) = &module_only {
+            let mut is_mo = vec![false; n_features];
+            for &g in &mo.genes {
+                is_mo[g as usize] = true;
+            }
+            let n_all = resolved.n_pairs();
+            resolved = resolved.without_genes(&is_mo);
+            if resolved.n_pairs() < n_all {
+                info!(
+                    "Phase 1 (hier) — {} cis pair(s) of module-only genes dropped",
+                    n_all - resolved.n_pairs()
+                );
+            }
+        }
+        if cfg.background_modules.iter().any(|&b| b) {
+            let n_all = resolved.n_pairs();
+            resolved = resolved.without_peak_modules(&cfg.background_modules);
+            info!(
+                "Phase 1 (hier) — {} cis pair(s) to near-empty or scattered peaks dropped",
+                n_all - resolved.n_pairs()
+            );
+        }
+        params.cis = Some(super::cis_gates::CisGateParams::new(
+            &resolved,
+            &part.module_of,
+            n_features,
+            &cfg.device,
+        )?);
+        info!(
+            "Phase 1 (hier) — cis gates on {} pairs (shared θ, γ); RNA gene scores mix pooled ATAC",
+            resolved.n_pairs()
+        );
+    }
     let skip: Vec<bool> = module_only
         .as_ref()
         .map_or_else(Vec::new, |mo| mo.skip.clone());
+    if !cfg.module_group.is_empty() {
+        anyhow::ensure!(
+            cfg.module_group.len() == n_m,
+            "module groups for {} modules, {n_m} in the partition",
+            cfg.module_group.len()
+        );
+        params.group = GroupIntercepts::new(n_u, &cfg.module_group, &cfg.device)?;
+        if let Some(gi) = &params.group {
+            anyhow::ensure!(
+                preset.is_none() && preset_offsets.is_empty(),
+                "per-unit group intercepts centre μ within each group, which a \
+                 preset's given rows would not survive"
+            );
+            gi.centre(&params.mu)?;
+            info!(
+                "Phase 1 (hier) — per-unit intercepts on {} module group(s) (group 0 the \
+                 reference): each unit's split of counts across groups is its own",
+                gi.n_groups
+            );
+        }
+    }
     let mut opt = Optimizers::new(&params, cfg.lr)?;
     let ctx = StepCtx {
         units,
@@ -242,9 +437,10 @@ pub fn train(
         skip_module: &skip,
     };
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
-    let pickers = module_pickers(&um, n_m);
+    let pickers = module_pickers(&um, n_m, &skip);
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
+    let n_threads = step_threads(&cfg.device);
     let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
     let lora_ridge_step = params
         .lora
@@ -253,8 +449,23 @@ pub fn train(
     info!(
         "Phase 1 (hier) — {n_u} units × {d} genes on {n_t} track(s) ({n_features} feature rows) \
          in {n_m} modules, H={h}: {} epochs × {steps_per_epoch} steps of {} units, K={} \
-         modules/unit, lr {}",
-        cfg.epochs, cfg.units_per_step, cfg.modules_per_unit, cfg.lr
+         modules/unit, lr {}, device {}, {n_threads} host slice(s) per step{}",
+        cfg.epochs,
+        cfg.units_per_step,
+        cfg.modules_per_unit,
+        cfg.lr,
+        if cfg.device.is_cuda() {
+            "cuda"
+        } else if cfg.device.is_metal() {
+            "metal"
+        } else {
+            "cpu"
+        },
+        if cfg.device.is_cpu() {
+            ""
+        } else {
+            " (candle SGD on device; no host split)"
+        },
     );
     let bar = new_progress_bar(cfg.epochs as u64);
     let mut last_per_unit = f64::NAN;
@@ -268,10 +479,27 @@ pub fn train(
                 info!("Phase 1 (hier) — stop requested at epoch {epoch}");
                 break 'epochs;
             }
-            let plan = draw_plan(chunk, &pickers, n_m, n_t, cfg.modules_per_unit, &mut rng);
-            let (stats, loss): (StepStats, _) =
-                step_loss(&params, &ctx, &plan, offset_l2_step, lora_ridge_step)?;
-            let grads = loss.backward()?;
+            // The cis pool once per step; the slices share it as leaves and
+            // its gradient goes back through the pool once.
+            let cis_graph = cis_mix(&params)?;
+            let cis_leaves = cis_graph.as_ref().map(CisMix::detached).transpose()?;
+            let loss_of = |slice: &[u32], rng: &mut StdRng| {
+                let plan = draw_plan(slice, &pickers, n_m, n_t, cfg.modules_per_unit, rng);
+                step_loss(
+                    &params,
+                    &ctx,
+                    &plan,
+                    offset_l2_step,
+                    lora_ridge_step,
+                    cis_leaves.as_ref().map(|l| &l.mix),
+                )
+            };
+            let (stats, mut grads) = step_grads(chunk, n_threads, &mut rng, &loss_of)?;
+            if let (Some(graph), Some(leaves)) = (&cis_graph, &cis_leaves) {
+                if let Some(through) = leaves.backprop(graph, &grads)? {
+                    merge_grads(&mut grads, &through)?;
+                }
+            }
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;
             acc.loss_gene += stats.loss_gene;
@@ -308,12 +536,23 @@ pub fn train(
     )?;
     let e_u_host = to_host(params.e_u.as_tensor())?;
     let e_u = DMatrix::<f32>::from_row_slice(n_u, h, &e_u_host);
+    let cis = cis_readout(&params)?;
+    let group_intercepts = match params.group.as_ref() {
+        Some(gi) => Some(DMatrix::<f32>::from_row_slice(
+            n_u,
+            gi.n_groups - 1,
+            &to_host(gi.beta.as_tensor())?,
+        )),
+        None => None,
+    };
     Ok(HierOutput {
         e_u,
         rho,
         b_feat,
         final_loss_per_unit: last_per_unit,
         labels: labels.to_vec(),
+        cis,
+        group_intercepts,
     })
 }
 

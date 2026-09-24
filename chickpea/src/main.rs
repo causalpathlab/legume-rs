@@ -63,20 +63,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Link cis peaks to genes by localized attention over a gene-centric embedding
+    /// Link cis peaks to genes over a multiome embedding (bge-style)
     #[command(
         long_about = "Link ATAC peaks to RNA genes.\n\
                       \n\
-                      Peak counts are aggregated onto genes through ABC contact weights.\n\
-                      RNA and peak-aggregated rows are embedded as two tracks of each gene.\n\
-                      Peak rows are folded in against the shared pseudobulk embeddings.\n\
-                      Each gene then attends over its cis peaks.\n\
-                      A score is a learned distance kernel plus a low-rank content term.\n\
-                      Training makes the pooled peak rows agree with the gene's RNA row.\n\
-                      The attention shares are the links.\n\
+                      RNA genes and ATAC peaks are embedded on one multiome axis\n\
+                      (ATAC module-only, like senna bge --multiome). Cis ABC pairs\n\
+                      are scored with ReLU gates: contact × agreement of the peak's\n\
+                      module row with the gene row. Gate weights are the links.\n\
                       \n\
-                      {out}.links.parquet has gene, peak, distance, abc and attention.\n\
-                      {out}.links_by_cluster.parquet has the shares within each cell cluster.\n\
+                      {out}.links.parquet has gene, peak, distance, abc and gate.\n\
+                      {out}.links_by_cluster.parquet has gene_idx/peak_idx/cluster shares.\n\
                       Gene, peak and cell embeddings and cell clusters are written too.",
         after_long_help = ENV_HELP,
         aliases = ["p2g", "peak2gene"]

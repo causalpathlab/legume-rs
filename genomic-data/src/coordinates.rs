@@ -196,8 +196,8 @@ pub fn find_cis_peaks(
 }
 
 /// Load gene TSS positions from a GFF/GTF file, aligned to `gene_names`
-/// by exact symbol match. Strand-discarding projection of
-/// [`load_gene_loci`].
+/// via [`align_gene_loci`] (Ensembl id / HGNC symbol /
+/// `ENSG…_SYMBOL`). Strand-discarding projection of [`load_gene_loci`].
 pub fn load_gene_tss(
     gff_file: &str,
     gene_names: &[Box<str>],
@@ -213,16 +213,14 @@ pub fn load_gene_tss(
         .collect())
 }
 
-/// Load a `gene-symbol → (chr, TSS, strand)` map from a GFF/GTF file.
+/// Load a `gene-symbol / Ensembl-id → (chr, TSS, strand)` map from a GFF/GTF.
 ///
-/// Only `gene` features are kept; each gene is keyed by its symbol,
-/// falling back to the Ensembl id when the symbol is missing. Unlike
-/// [`load_gene_tss`], the strand is retained so callers can split
-/// forward/Watson genes from backward/Crick genes. Keys are the raw GFF
-/// symbols — callers that need alias-tolerant matching (e.g.
-/// `ENSG…_SYMBOL` row names) should canonicalize both sides themselves.
+/// Only `gene` features are kept. Each gene is registered under its HGNC
+/// symbol (when present) **and** its version-stripped Ensembl id, so
+/// [`align_gene_loci`] / [`GeneIndexResolver`] can match either form (and
+/// compound `ENSG…_SYMBOL` row names).
 pub fn load_gene_loci_map(gff_file: &str) -> anyhow::Result<FxHashMap<Box<str>, GeneLoc>> {
-    use crate::gff::{read_gff_record_vec, FeatureType, GeneSymbol};
+    use crate::gff::{parse_ensembl_id, read_gff_record_vec, FeatureType, GeneId, GeneSymbol};
     use log::info;
 
     let records = read_gff_record_vec(gff_file)?;
@@ -236,31 +234,67 @@ pub fn load_gene_loci_map(gff_file: &str) -> anyhow::Result<FxHashMap<Box<str>, 
             Strand::Forward => rec.start,
             Strand::Backward => rec.stop,
         };
-        let key: Box<str> = match &rec.gene_name {
-            GeneSymbol::Symbol(s) => s.clone(),
-            GeneSymbol::Missing => {
-                let id: Box<str> = rec.gene_id.clone().into();
-                id
-            }
+        let loc = GeneLoc {
+            chr: rec.seqname.clone(),
+            tss,
+            strand: rec.strand,
         };
-        loc_map.insert(
-            key,
-            GeneLoc {
-                chr: rec.seqname.clone(),
-                tss,
-                strand: rec.strand,
-            },
-        );
+        if let GeneSymbol::Symbol(s) = &rec.gene_name {
+            loc_map.entry(s.clone()).or_insert_with(|| loc.clone());
+        }
+        if let GeneId::Ensembl(id) = &rec.gene_id {
+            let key: Box<str> = parse_ensembl_id(id).unwrap_or(id.as_ref()).into();
+            loc_map.entry(key).or_insert(loc);
+        } else if matches!(rec.gene_name, GeneSymbol::Missing) {
+            let id: Box<str> = rec.gene_id.clone().into();
+            loc_map.entry(id).or_insert(loc);
+        }
     }
 
-    info!("Loaded {} gene loci from GFF", loc_map.len());
+    info!("Loaded {} gene-locus keys from GFF", loc_map.len());
     Ok(loc_map)
 }
 
+/// Align a `key → GeneLoc` map onto `gene_names` with
+/// [`legume_numeric::matrix::membership::GeneIndexResolver`]: exact name,
+/// HGNC symbol, or Ensembl id (including `ENSG…_SYMBOL` compounds).
+pub fn align_gene_loci(
+    gene_names: &[Box<str>],
+    loci_by_key: &FxHashMap<Box<str>, GeneLoc>,
+) -> Vec<Option<GeneLoc>> {
+    align_by_gene_key(gene_names, loci_by_key)
+}
+
+/// Align a `key → GeneTss` map the same way as [`align_gene_loci`].
+pub fn align_gene_tss(
+    gene_names: &[Box<str>],
+    tss_by_key: &FxHashMap<Box<str>, GeneTss>,
+) -> Vec<Option<GeneTss>> {
+    align_by_gene_key(gene_names, tss_by_key)
+}
+
+/// `values_by_key` onto `gene_names` by [`GeneIndexResolver`]; the first key
+/// that resolves to a gene wins.
+fn align_by_gene_key<T: Clone>(
+    gene_names: &[Box<str>],
+    values_by_key: &FxHashMap<Box<str>, T>,
+) -> Vec<Option<T>> {
+    use legume_numeric::matrix::membership::GeneIndexResolver;
+
+    let resolver = GeneIndexResolver::build(gene_names, Some('_'), false);
+    let mut out = vec![None; gene_names.len()];
+    for (key, value) in values_by_key {
+        if let Some(i) = resolver.resolve(key) {
+            if out[i].is_none() {
+                out[i] = Some(value.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Load gene TSS positions **and strand** from a GFF/GTF file, aligned
-/// to `gene_names` by exact symbol match (`None` where a name has no
-/// matching `gene` record). For alias-tolerant matching, prefer
-/// [`load_gene_loci_map`] + a caller-side canonicalizer.
+/// to `gene_names` via [`align_gene_loci`] (`None` where unmatched).
 pub fn load_gene_loci(
     gff_file: &str,
     gene_names: &[Box<str>],
@@ -268,11 +302,7 @@ pub fn load_gene_loci(
     use log::info;
 
     let loc_map = load_gene_loci_map(gff_file)?;
-
-    let result: Vec<Option<GeneLoc>> = gene_names
-        .iter()
-        .map(|name| loc_map.get(name).cloned())
-        .collect();
+    let result = align_gene_loci(gene_names, &loc_map);
 
     let matched = result.iter().filter(|x| x.is_some()).count();
     info!("Matched {}/{} genes to GFF loci", matched, gene_names.len());
@@ -356,5 +386,25 @@ chr1\tHAVANA\texon\t100\t150\t.\t+\t.\tgene_id \"ENSG001\"; gene_name \"AAA\"
         assert_eq!(bbb.tss, 600);
 
         assert!(loci[2].is_none());
+    }
+
+    #[test]
+    fn load_gene_loci_matches_ensg_symbol_compounds() {
+        let gtf = "\
+chr1\tHAVANA\tgene\t100\t200\t.\t+\t.\tgene_id \"ENSG00000186092.7\"; gene_name \"OR4F5\"; gene_type \"protein_coding\"
+chr1\tHAVANA\tgene\t400\t600\t.\t-\t.\tgene_id \"ENSG00000237613.2\"; gene_name \"FAM138A\"; gene_type \"protein_coding\"
+";
+        let path = std::env::temp_dir().join(format!("genloci_cmp_{}.gtf", std::process::id()));
+        std::fs::write(&path, gtf).unwrap();
+        let names: Vec<Box<str>> = vec![
+            "ENSG00000186092_OR4F5".into(),
+            "FAM138A".into(),
+            "ENSG00000237613".into(),
+        ];
+        let loci = load_gene_loci(path.to_str().unwrap(), &names).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(loci[0].as_ref().unwrap().tss, 100);
+        assert_eq!(loci[1].as_ref().unwrap().tss, 600);
+        assert_eq!(loci[2].as_ref().unwrap().tss, 600);
     }
 }

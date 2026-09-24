@@ -28,6 +28,9 @@ fn cfg() -> HierConfig {
         offset_rank: 2,
         device: Device::Cpu,
         module_only: Vec::new(),
+        cis_gates: None,
+        module_group: Vec::new(),
+        background_modules: Vec::new(),
     }
 }
 
@@ -235,7 +238,7 @@ fn draw_plan_weights_sum_to_one_per_unit() {
         by_module: vec![Vec::new(), Vec::new()],
     };
     let mut rng = StdRng::seed_from_u64(7);
-    let pickers = module_pickers(&um, n_m);
+    let pickers = module_pickers(&um, n_m, &[]);
     assert_eq!(pickers.len(), 2 * n_t);
     let plan = draw_plan(&[0, 1], &pickers, n_m, n_t, 10, &mut rng);
     let mut sum_by_unit_track = std::collections::HashMap::new();
@@ -722,4 +725,342 @@ fn a_module_mixing_module_only_and_residual_features_is_refused() {
         .err()
         .expect("a mixed module must be refused");
     assert!(err.to_string().contains("module-only"), "{err}");
+}
+
+/// The threaded step is the serial step: slice seeds are drawn from the step
+/// rng in slice order, so running the slices one by one with those seeds
+/// gives the same losses and the same summed gradients.
+#[test]
+fn a_threaded_step_sums_the_slices_losses_and_gradients() {
+    use crate::fit::hier::params::HierParams;
+    use crate::fit::hier::partition::{Partition, TrackSupport, UnitModules};
+    use crate::fit::hier::step::{step_loss, StepCtx};
+    use legume_numeric::candle::convert::to_host;
+    use rand::Rng;
+
+    let (units, labels) = planted_units();
+    let part = Partition::from_labels(&labels, 2);
+    let um = UnitModules::new(&units, &part);
+    let sup = TrackSupport::new(&units.tracks, &part);
+    let pickers = module_pickers(&um, 2, &[]);
+    let params = HierParams::new(units.n_units(), 2, 20, 4, 5, &Device::Cpu).unwrap();
+    let skip = Vec::new();
+    let ctx = StepCtx {
+        units: &units,
+        um: &um,
+        part: &part,
+        sup: &sup,
+        skip_module: &skip,
+    };
+    let chunk: Vec<u32> = (0..12).collect();
+    let loss_of = |slice: &[u32], rng: &mut StdRng| -> anyhow::Result<(StepStats, Tensor)> {
+        let plan = draw_plan(slice, &pickers, 2, 1, 2, rng);
+        step_loss(&params, &ctx, &plan, 0.0, 0.0, None)
+    };
+    let mut rng = StdRng::seed_from_u64(11);
+    let (stats, grads) = step_grads(&chunk, 3, &mut rng, &loss_of).unwrap();
+    let mut rng = StdRng::seed_from_u64(11);
+    let seeds: Vec<u64> = (0..3).map(|_| rng.next_u64()).collect();
+    let mut want_module = 0.0;
+    let mut want_e_u: Option<Vec<f32>> = None;
+    for (slice, &seed) in chunk.chunks(4).zip(&seeds) {
+        let mut r = StdRng::seed_from_u64(seed);
+        let (s, loss) = loss_of(slice, &mut r).unwrap();
+        want_module += s.loss_module;
+        let g = loss.backward().unwrap();
+        let ge = to_host(g.get(&params.e_u).unwrap()).unwrap();
+        want_e_u = Some(match want_e_u {
+            None => ge,
+            Some(acc) => acc.iter().zip(&ge).map(|(a, b)| a + b).collect(),
+        });
+    }
+    assert!(
+        (stats.loss_module - want_module).abs() < 1e-4,
+        "{} vs {want_module}",
+        stats.loss_module
+    );
+    let got = to_host(grads.get(&params.e_u).unwrap()).unwrap();
+    for (a, b) in got.iter().zip(want_e_u.unwrap()) {
+        assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+    }
+}
+
+#[test]
+fn a_step_over_fewer_units_than_threads_runs_on_one_slice() {
+    use crate::fit::hier::params::HierParams;
+    use crate::fit::hier::partition::{Partition, TrackSupport, UnitModules};
+    use crate::fit::hier::step::{step_loss, StepCtx};
+
+    let (units, labels) = planted_units();
+    let part = Partition::from_labels(&labels, 2);
+    let um = UnitModules::new(&units, &part);
+    let sup = TrackSupport::new(&units.tracks, &part);
+    let pickers = module_pickers(&um, 2, &[]);
+    let params = HierParams::new(units.n_units(), 2, 20, 4, 5, &Device::Cpu).unwrap();
+    let skip = Vec::new();
+    let ctx = StepCtx {
+        units: &units,
+        um: &um,
+        part: &part,
+        sup: &sup,
+        skip_module: &skip,
+    };
+    let loss_of = |slice: &[u32], rng: &mut StdRng| -> anyhow::Result<(StepStats, Tensor)> {
+        let plan = draw_plan(slice, &pickers, 2, 1, 2, rng);
+        step_loss(&params, &ctx, &plan, 0.0, 0.0, None)
+    };
+    let mut rng = StdRng::seed_from_u64(3);
+    let (stats, grads) = step_grads(&[0, 1], 8, &mut rng, &loss_of).unwrap();
+    assert!(stats.loss_module.is_finite());
+    assert!(grads.get(&params.e_u).is_some());
+}
+
+#[test]
+fn only_a_cpu_device_slices_a_step_across_threads() {
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    assert_eq!(step_threads(&Device::Cpu), cores);
+}
+
+/// Cis gates on the planted programs: every gene of one program paired with
+/// the same-index gene of the other. A fit moves the shared gate scalars off
+/// their start (the gates train) and returns a finite weight per pair.
+#[test]
+fn a_fit_with_cis_gates_trains_the_gate_scalars() {
+    let (units, labels) = planted_units();
+    let n_pairs = 20usize;
+    let gates = crate::fit::hier::CisGates {
+        gene_feat: (0..20u32).collect(),
+        peak_feat: (0..20u32).map(|g| (g + 10) % 20).collect(),
+        abc: vec![1.0; n_pairs],
+        z_log_contact: (0..n_pairs).map(|k| k as f32 / 10.0 - 1.0).collect(),
+    };
+    let out = run(
+        &units,
+        &labels,
+        4,
+        &HierConfig {
+            epochs: 30,
+            cis_gates: Some(gates),
+            ..cfg()
+        },
+        None,
+        &[],
+    )
+    .unwrap();
+    let cis = out.cis.expect("a cis readout");
+    assert_eq!(cis.w.len(), n_pairs);
+    assert!(
+        cis.w.iter().all(|w| w.is_finite() && *w >= 0.0),
+        "{:?}",
+        cis.w
+    );
+    let moved = (cis.theta0 - 1.0).abs() + (cis.theta3 - 0.5).abs() + (cis.gamma1 - 0.01).abs();
+    assert!(moved > 1e-2, "the gates never moved: {cis:?}");
+}
+
+/// One unit on one track whose composition puts most of its counts on a
+/// module-only module (module 0).
+fn skewed_unit_modules() -> UnitModules {
+    UnitModules {
+        n_tracks: 1,
+        n_modules: 3,
+        q: vec![0.6, 0.3, 0.1],
+        n_um: vec![0.0; 3],
+        by_module: vec![Vec::new()],
+    }
+}
+
+/// A module-only module has no gene level, so a draw that lands there is
+/// wasted: draws go only to modules with a gene level, and a unit's pair
+/// weights sum to its share of counts on those modules.
+#[test]
+fn module_draws_skip_module_only_modules() {
+    let um = skewed_unit_modules();
+    let skip = [true, false, false];
+    let pickers = module_pickers(&um, 3, &skip);
+    let mut rng = StdRng::seed_from_u64(5);
+    let plan = draw_plan(&[0], &pickers, 3, 1, 8, &mut rng);
+    let mut total = 0.0f32;
+    for ((_, m), pairs) in &plan.pairs_by_module {
+        assert_ne!(*m, 0, "a draw landed on the module-only module");
+        total += pairs.iter().map(|p| p.1).sum::<f32>();
+    }
+    assert!(
+        (total - 0.4).abs() < 1e-6,
+        "weights sum to {total}, not the residual share"
+    );
+}
+
+/// The re-weighted draw estimates the same gene-level sum as drawing over
+/// every module: `E[Σ_pairs w·f(m)] = Σ_{m with a gene level} q_m·f(m)`.
+#[test]
+fn residual_module_draws_are_unbiased() {
+    let um = skewed_unit_modules();
+    let skip = [true, false, false];
+    let f = [100.0f64, 2.0, 7.0];
+    let want: f64 = [1usize, 2].iter().map(|&m| f64::from(um.q[m]) * f[m]).sum();
+    let pickers = module_pickers(&um, 3, &skip);
+    let mut rng = StdRng::seed_from_u64(9);
+    let n = 20_000;
+    let mut got = 0.0f64;
+    for _ in 0..n {
+        let plan = draw_plan(&[0], &pickers, 3, 1, 4, &mut rng);
+        for ((_, m), pairs) in &plan.pairs_by_module {
+            got += pairs
+                .iter()
+                .map(|p| f64::from(p.1) * f[*m as usize])
+                .sum::<f64>();
+        }
+    }
+    got /= f64::from(n);
+    assert!((got - want).abs() < 0.02 * want, "{got} vs {want}");
+}
+
+/// A unit whose counts sit only on module-only modules draws nothing.
+#[test]
+fn a_unit_with_only_module_only_counts_draws_nothing() {
+    let um = skewed_unit_modules();
+    let pickers = module_pickers(&um, 3, &[true, true, true]);
+    assert!(pickers[0].is_none());
+}
+
+/// A two-modality axis: RNA features `0..20` and ATAC features `20..40`, two
+/// programs mirrored in both (units `0..20` count RNA `0..10` + ATAC `20..30`,
+/// the rest the other halves), and every unit's ATAC counts scaled by a
+/// planted ratio independent of its program. Modules `0, 1` are RNA, `2, 3`
+/// ATAC. Returns the units, labels, per-module group, and `ln ratio` per unit.
+fn planted_ratio_multiome() -> (UnitTable, Vec<u32>, Vec<u32>, Vec<f32>) {
+    let n_u = 40u32;
+    let log_ratio: Vec<f32> = (0..n_u).map(|u| 1.5 * (u as f32 * 1.7).sin()).collect();
+    let mut trip = Vec::new();
+    for u in 0..n_u {
+        let a = u < n_u / 2;
+        let scale = log_ratio[u as usize].exp();
+        for g in 0..20u32 {
+            let own = (g < 10) == a;
+            let c = if own { 20.0 + (g % 3) as f32 } else { 1.0 };
+            trip.push(t(u, g, c));
+            trip.push(t(u, g + 20, c * scale));
+        }
+    }
+    let units = UnitTable::from_pseudobulks_and_cells(&[&trip], &[n_u as usize], &[], None, 40);
+    let labels: Vec<u32> = (0..40u32).map(|g| g / 10).collect();
+    (units, labels, vec![0, 0, 1, 1], log_ratio)
+}
+
+fn spearman(a: &[f32], b: &[f32]) -> f32 {
+    let rank = |v: &[f32]| {
+        let mut idx: Vec<usize> = (0..v.len()).collect();
+        idx.sort_by(|&i, &j| v[i].total_cmp(&v[j]));
+        let mut r = vec![0f32; v.len()];
+        for (k, &i) in idx.iter().enumerate() {
+            r[i] = k as f32;
+        }
+        r
+    };
+    let (ra, rb) = (rank(a), rank(b));
+    let m = (ra.len() as f32 - 1.0) / 2.0;
+    let (mut sab, mut saa, mut sbb) = (0f32, 0f32, 0f32);
+    for (x, y) in ra.iter().zip(&rb) {
+        sab += (x - m) * (y - m);
+        saa += (x - m) * (x - m);
+        sbb += (y - m) * (y - m);
+    }
+    sab / (saa * sbb).sqrt()
+}
+
+/// R² of `y` regressed on the columns of `x` plus an intercept.
+fn r_squared(x: &DMatrix<f32>, y: &[f32]) -> f32 {
+    let n = x.nrows();
+    let xi = DMatrix::<f64>::from_fn(n, x.ncols() + 1, |i, j| {
+        if j == 0 {
+            1.0
+        } else {
+            f64::from(x[(i, j - 1)])
+        }
+    });
+    let yv = nalgebra::DVector::<f64>::from_iterator(n, y.iter().map(|&v| f64::from(v)));
+    let beta = (xi.transpose() * &xi).try_inverse().expect("full rank") * xi.transpose() * &yv;
+    let res = &yv - &xi * beta;
+    let mean = yv.mean();
+    let ss: f64 = yv.iter().map(|v| (v - mean).powi(2)).sum();
+    (1.0 - res.norm_squared() / ss) as f32
+}
+
+/// With one intercept per unit and module group, a unit's ATAC:RNA count
+/// ratio is absorbed by that intercept instead of being written into the unit
+/// embedding: the intercept tracks the planted ratio.
+#[test]
+fn a_group_intercept_tracks_each_units_modality_ratio() {
+    let (units, labels, group, log_ratio) = planted_ratio_multiome();
+    let out = run(
+        &units,
+        &labels,
+        4,
+        &HierConfig {
+            n_modules: 4,
+            module_group: group,
+            ..cfg()
+        },
+        None,
+        &[],
+    )
+    .unwrap();
+    let beta = out.group_intercepts.expect("group intercepts");
+    assert_eq!((beta.nrows(), beta.ncols()), (40, 1));
+    let b: Vec<f32> = beta.column(0).iter().copied().collect();
+    let s = spearman(&b, &log_ratio);
+    assert!(s > 0.9, "intercept vs planted ln ratio: Spearman {s}");
+}
+
+/// Without the intercept the unit embedding has to carry the ratio; with it,
+/// much less of the ratio is linearly readable from `e_u`.
+#[test]
+fn a_group_intercept_takes_the_modality_ratio_out_of_the_unit_embedding() {
+    let (units, labels, group, log_ratio) = planted_ratio_multiome();
+    let fit = |group: Vec<u32>| {
+        run(
+            &units,
+            &labels,
+            4,
+            &HierConfig {
+                n_modules: 4,
+                module_group: group,
+                ..cfg()
+            },
+            None,
+            &[],
+        )
+        .unwrap()
+    };
+    let without = r_squared(&fit(Vec::new()).e_u, &log_ratio);
+    let with = r_squared(&fit(group).e_u, &log_ratio);
+    assert!(
+        with < 0.5 * without,
+        "ln ratio R² from e_u: {with} with the intercept vs {without} without"
+    );
+}
+
+/// `centre` puts every group's module rows on a zero mean and keeps the
+/// differences between rows of the same group.
+#[test]
+fn centring_zeroes_each_groups_mean_and_keeps_within_group_differences() {
+    use crate::fit::hier::params::GroupIntercepts;
+    use legume_numeric::candle::candle_core::Var;
+    let dev = Device::Cpu;
+    let gi = GroupIntercepts::new(3, &[0, 0, 1, 1, 1], &dev)
+        .unwrap()
+        .unwrap();
+    let raw = vec![1.0f32, 2.0, 3.0, 6.0, -1.0, 0.0, 2.0, 1.0, 5.0, 5.0];
+    let mu = Var::from_vec(raw.clone(), (5, 2), &dev).unwrap();
+    gi.centre(&mu).unwrap();
+    let c = to_host(mu.as_tensor()).unwrap();
+    for (rows, name) in [(0..2usize, "group 0"), (2..5, "group 1")] {
+        for k in 0..2 {
+            let mean: f32 = rows.clone().map(|m| c[m * 2 + k]).sum::<f32>() / rows.len() as f32;
+            assert!(mean.abs() < 1e-6, "{name} column {k} mean {mean}");
+        }
+    }
+    assert!(((c[0] - c[2]) - (raw[0] - raw[2])).abs() < 1e-6);
+    assert!(((c[5] - c[9]) - (raw[5] - raw[9])).abs() < 1e-6);
 }

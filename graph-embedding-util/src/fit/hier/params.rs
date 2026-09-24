@@ -146,6 +146,87 @@ pub struct HierParams {
     pub offset_lr_ratio: f32,
     /// The seed the tables were drawn from; the LoRA row factors draw from it too.
     pub seed: u64,
+    /// Optional cis gates mixed into RNA gene scores.
+    pub cis: Option<super::cis_gates::CisGateParams>,
+    /// Optional per-unit intercept per module group (see [`GroupIntercepts`]).
+    pub group: Option<GroupIntercepts>,
+}
+
+/// One intercept per unit and module GROUP (a modality, on a multiome axis),
+/// added to the unit's module scores:
+///
+/// ```text
+/// logit_um = ⟨e_u, μ_m⟩ + b_m + β_{u, k(m)}        β_{u, 0} = 0
+/// ```
+///
+/// A unit's split of counts across groups (its ATAC:RNA ratio) is then
+/// absorbed by `β_u` instead of being written into `e_u` and `μ` as a group
+/// axis. Group 0 is the reference; the module softmax is shift-invariant, so
+/// only `K − 1` intercepts per unit are free. Constant within a module, `β`
+/// never reaches the gene level.
+///
+/// `β` alone is not identified: a direction `μ̄_k` shared by group `k`'s rows
+/// gives `⟨e_u, μ̄_k⟩`, another per-(unit, group) intercept. So `μ` is held
+/// centred within each group ([`Self::centre`]): `Σ_{m ∈ k} μ_m = 0`. The
+/// removed term is exactly what `β` covers, so the model loses nothing.
+pub struct GroupIntercepts {
+    /// `[n_units, K − 1]`, groups `1..K`.
+    pub beta: Var,
+    pub n_groups: usize,
+    /// `[K − 1, M]` one-hot of every module's non-reference group.
+    onehot: Tensor,
+    /// `[K, M]`, `1 / n_k` on group `k`'s modules: `avg · μ` is the group means.
+    avg: Tensor,
+    /// `[M]` group of every module, `u32`.
+    group_ids: Tensor,
+}
+
+impl GroupIntercepts {
+    /// `None` when fewer than two groups are named. The group tables are fixed
+    /// for the fit, so they are built here once.
+    pub fn new(n_units: usize, module_group: &[u32], dev: &Device) -> CResult<Option<Self>> {
+        let n_groups = module_group.iter().max().map_or(0, |&k| k as usize + 1);
+        if n_groups < 2 {
+            return Ok(None);
+        }
+        let n_m = module_group.len();
+        let mut size = vec![0f32; n_groups];
+        for &g in module_group {
+            size[g as usize] += 1.0;
+        }
+        let (mut onehot, mut avg) = (vec![0f32; (n_groups - 1) * n_m], vec![0f32; n_groups * n_m]);
+        for (m, &g) in module_group.iter().enumerate() {
+            let g = g as usize;
+            if g > 0 {
+                onehot[(g - 1) * n_m + m] = 1.0;
+            }
+            avg[g * n_m + m] = 1.0 / size[g];
+        }
+        Ok(Some(Self {
+            beta: Var::zeros((n_units, n_groups - 1), DType::F32, dev)?,
+            n_groups,
+            onehot: Tensor::from_vec(onehot, (n_groups - 1, n_m), dev)?,
+            avg: Tensor::from_vec(avg, (n_groups, n_m), dev)?,
+            group_ids: Tensor::from_vec(module_group.to_vec(), n_m, dev)?,
+        }))
+    }
+
+    /// `β_b · G` for the units `unit_ids` over the modules `mods`: `[B, |mods|]`,
+    /// `G` the one-hot of the non-reference groups (all modules on a full track).
+    pub fn scores(&self, unit_ids: &Tensor, mods: &[u32]) -> CResult<Tensor> {
+        let beta = gather_rows(self.beta.as_tensor(), unit_ids)?;
+        if mods.len() == self.onehot.dim(1)? {
+            return beta.matmul(&self.onehot);
+        }
+        let cols = Tensor::from_vec(mods.to_vec(), mods.len(), unit_ids.device())?;
+        beta.matmul(&self.onehot.index_select(&cols, 1)?)
+    }
+
+    /// `μ_m ← μ_m − mean_{m' ∈ k(m)} μ_{m'}`: every group's rows sum to zero.
+    pub fn centre(&self, mu: &Var) -> CResult<()> {
+        let means = self.avg.matmul(mu.as_tensor())?;
+        mu.set(&(mu.as_tensor() - gather_rows(&means, &self.group_ids)?)?)
+    }
 }
 
 pub use crate::preset_mode::PresetRows;
@@ -236,6 +317,8 @@ impl HierParams {
             offset_rank,
             offset_lr_ratio: LoraSpec::default().lr_ratio,
             seed,
+            cis: None,
+            group: None,
         })
     }
 

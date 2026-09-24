@@ -9,7 +9,7 @@ fn chickpea() -> Command {
     Command::new(env!("CARGO_BIN_EXE_chickpea"))
 }
 
-const SMALL: [&str; 16] = [
+const SMALL: [&str; 14] = [
     "--embedding-dim",
     "8",
     "--epochs",
@@ -22,10 +22,8 @@ const SMALL: [&str; 16] = [
     "8",
     "--feature-modules",
     "4",
-    "--attention-rank",
-    "4",
-    "--attention-epochs",
-    "50",
+    "--module-only-min-rows",
+    "30",
 ];
 
 #[test]

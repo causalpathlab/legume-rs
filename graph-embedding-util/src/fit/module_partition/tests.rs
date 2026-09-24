@@ -209,11 +209,189 @@ fn partition_by_group_never_mixes_groups() {
     let group: Vec<u32> = (0..counts.nrows())
         .map(|i| u32::from(i >= a.nrows()))
         .collect();
-    let (labels, n) = partition_modules_by_group(&counts, &sizes, &group, &[3, 3], 5).unwrap();
+    let part =
+        partition_modules_by_group(&counts, &sizes, &group, &[3, 3], &[0, 0], None, 5).unwrap();
+    let (labels, n) = (part.labels, part.n_modules);
     assert_eq!(n, 6);
     assert!(labels[..a.nrows()].iter().all(|&m| m < 3), "{labels:?}");
     assert!(
         labels[a.nrows()..].iter().all(|&m| (3..6).contains(&m)),
         "{labels:?}"
+    );
+}
+
+/// The background-to-module-only switch is opt-in: off, nothing is flagged.
+#[test]
+fn uninformative_module_only_is_off_unless_asked() {
+    let (counts, sizes) = planted(2, 6, 4, 4, 16, 3);
+    let spec = TrackSpec::base(counts.nrows());
+    assert!(flat_module_only(&counts, &sizes, &spec, false).is_none());
+}
+
+/// On, a one-track axis flags exactly the rows the coarsener would put in its
+/// background group, and never a planted program's row.
+#[test]
+fn uninformative_module_only_flags_the_background_rows() {
+    let (counts, sizes) = planted(2, 6, 4, 4, 16, 3);
+    let spec = TrackSpec::base(counts.nrows());
+    let flags = flat_module_only(&counts, &sizes, &spec, true).expect("flags");
+    assert_eq!(flags.len(), counts.nrows());
+    assert!(
+        flags[..12].iter().all(|&f| !f),
+        "a program row flagged: {flags:?}"
+    );
+    assert!(
+        flags[12..].iter().all(|&f| f),
+        "a flat/empty row kept: {flags:?}"
+    );
+}
+
+/// A multi-track axis never gets the switch: module-only rows need a one-track
+/// axis, and the partition there is over genes, not rows.
+#[test]
+fn uninformative_module_only_skips_a_multi_track_axis() {
+    let (counts, sizes) = planted(2, 6, 4, 4, 16, 3);
+    let n_g = counts.nrows();
+    let mut stacked = DMatrix::<f32>::zeros(2 * n_g, counts.ncols());
+    stacked.rows_mut(0, n_g).copy_from(&counts);
+    stacked.rows_mut(n_g, n_g).copy_from(&counts);
+    let spec = TrackSpec {
+        track_of_row: (0..2 * n_g).map(|r| u32::from(r >= n_g)).collect(),
+        gene_of_row: (0..2 * n_g).map(|r| (r % n_g) as u32).collect(),
+        tracks: vec![
+            TrackInfo {
+                name: "t0".into(),
+                is_count: true,
+            },
+            TrackInfo {
+                name: "t1".into(),
+                is_count: true,
+            },
+        ],
+    };
+    assert!(flat_module_only(&stacked, &sizes, &spec, true).is_none());
+}
+
+/// `planted` plus `n_scattered` isolated rows: each counted heavily in ONE
+/// pseudobulk and nowhere else, so it is not flat (informative) yet shares a
+/// profile with nothing — a peak that arises at random.
+fn planted_with_scattered(n_scattered: usize) -> (DMatrix<f32>, Vec<f32>, usize) {
+    let (base, sizes) = planted(3, 10, 5, 10, 24, 11);
+    let d0 = base.nrows();
+    let mut counts = DMatrix::<f32>::zeros(d0 + n_scattered, base.ncols());
+    counts.rows_mut(0, d0).copy_from(&base);
+    for j in 0..n_scattered {
+        counts[(d0 + j, (7 * j + 3) % base.ncols())] = 40.0;
+    }
+    (counts, sizes, d0)
+}
+
+/// With a minimum group size, scattered rows and near-empty rows share the
+/// background group, every other group meets the minimum, and no group mixes
+/// two programs.
+#[test]
+fn scattered_features_join_the_background_and_groups_meet_the_minimum() {
+    let (counts, sizes, d0) = planted_with_scattered(4);
+    let (labels, bg) = partition_modules_min_size(&counts, &sizes, 8, 3, 4).unwrap();
+    let bg = bg.expect("a background group");
+    assert!(labels.iter().all(|&m| m < 8), "{labels:?}");
+    for i in d0..counts.nrows() {
+        assert_eq!(
+            labels[i], bg,
+            "scattered row {i} left the background: {labels:?}"
+        );
+    }
+    for (i, &m) in labels.iter().enumerate().take(45).skip(35) {
+        assert_eq!(m, bg, "empty row {i} left the background");
+    }
+    let mut size = std::collections::HashMap::<u32, usize>::new();
+    for &m in &labels {
+        *size.entry(m).or_default() += 1;
+    }
+    for (&m, &n) in &size {
+        assert!(m == bg || n >= 4, "group {m} holds {n} < 4: {labels:?}");
+    }
+    let programs: Vec<_> = (0..3)
+        .map(|p| groups_of(&labels, p * 10..(p + 1) * 10))
+        .collect();
+    for a in 0..3 {
+        for b in a + 1..3 {
+            assert!(
+                programs[a].is_disjoint(&programs[b]),
+                "programs {a} and {b} share a group: bg {bg} {labels:?}"
+            );
+        }
+    }
+}
+
+/// The per-group partition reports which module ids are background, only for
+/// groups asked to drop scattered rows; group 0 keeps plain coarsening.
+#[test]
+fn partition_by_group_reports_background_modules() {
+    let (counts, sizes, d0) = planted_with_scattered(4);
+    let n = counts.nrows();
+    let group: Vec<u32> = vec![1; n];
+    let part =
+        partition_modules_by_group(&counts, &sizes, &group, &[3, 8], &[0, 4], None, 5).unwrap();
+    assert_eq!(part.n_modules, 11);
+    assert_eq!(part.background.len(), 11);
+    let bg: Vec<u32> = (0..11u32)
+        .filter(|&m| part.background[m as usize])
+        .collect();
+    assert_eq!(bg.len(), 1, "one background module for group 1: {bg:?}");
+    for i in d0..n {
+        assert_eq!(part.labels[i], bg[0]);
+    }
+}
+
+/// Two genomic blocks carrying the same planted programs: without blocks a
+/// program's rows in both blocks share a module; with blocks no module spans
+/// two blocks, the near-empty rows of both share one background, and the
+/// budget holds.
+#[test]
+fn blocked_partition_never_puts_two_blocks_in_one_module() {
+    let (half, sizes) = planted(3, 10, 5, 10, 24, 13);
+    let h = half.nrows();
+    let mut counts = DMatrix::<f32>::zeros(2 * h, half.ncols());
+    counts.rows_mut(0, h).copy_from(&half);
+    counts.rows_mut(h, h).copy_from(&half);
+    let block: Vec<u32> = (0..2 * h).map(|i| u32::from(i >= h)).collect();
+
+    let (plain, _) = partition_modules_min_size(&counts, &sizes, 8, 3, 0).unwrap();
+    assert!(
+        (0..h).any(|i| i < 30 && plain[i] == plain[i + h]),
+        "the fixture should merge across blocks without them: {plain:?}"
+    );
+
+    let (labels, bg) = partition_modules_blocked(&counts, &sizes, 8, 3, 0, &block).unwrap();
+    let bg = bg.expect("a background");
+    assert!(labels.iter().all(|&m| m < 8), "{labels:?}");
+    for m in 0..8u32 {
+        if m == bg {
+            continue;
+        }
+        let blocks: std::collections::BTreeSet<u32> = (0..2 * h)
+            .filter(|&i| labels[i] == m)
+            .map(|i| block[i])
+            .collect();
+        assert!(
+            blocks.len() <= 1,
+            "module {m} spans blocks {blocks:?}: {labels:?}"
+        );
+    }
+    for i in (35..45).chain(h + 35..h + 45) {
+        assert_eq!(labels[i], bg, "empty row {i} left the one background");
+    }
+}
+
+/// Rows whose module is a flagged background (flat or scattered features)
+/// are flagged; every other row is not.
+#[test]
+fn rows_in_background_modules_are_flagged() {
+    let labels = [0u32, 1, 2, 1, 0];
+    let background = [false, true, false];
+    assert_eq!(
+        background_rows(&labels, &background),
+        vec![false, true, false, true, false]
     );
 }

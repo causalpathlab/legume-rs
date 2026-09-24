@@ -304,7 +304,7 @@ fn total(
         sup,
         skip_module: &[],
     };
-    let (s, loss) = step_loss(p, &ctx, plan, l2, 0.0).unwrap();
+    let (s, loss) = step_loss(p, &ctx, plan, l2, 0.0, None).unwrap();
     (s.loss_module + s.loss_gene + s.loss_ridge, loss)
 }
 
@@ -375,6 +375,7 @@ fn the_step_loss_matches_the_f64_reference_with_tracks_and_ridge() {
         &plan,
         OFFSET_L2,
         0.0,
+        None,
     )
     .unwrap();
     assert!(s.loss_ridge > 0.0, "the moved offsets carry a ridge");
@@ -456,6 +457,7 @@ fn pair_weight_scales_the_gene_level_term() {
         &one,
         0.0,
         0.0,
+        None,
     )
     .unwrap();
     let (b, _) = step_loss(
@@ -470,6 +472,7 @@ fn pair_weight_scales_the_gene_level_term() {
         &half,
         0.0,
         0.0,
+        None,
     )
     .unwrap();
     assert!((b.loss_gene - 0.5 * a.loss_gene).abs() < 1e-5);

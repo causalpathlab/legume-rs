@@ -1,11 +1,12 @@
-//! End to end on a planted fixture: RNA plus peak-aggregated gene rows on two
-//! tracks, one short fit. The two cell programs separate, and each gene's two
-//! rows agree more than rows of unrelated genes.
+//! End to end on a planted fixture: RNA genes + ATAC peaks on one multiome
+//! axis (module-only ATAC). Cell programs separate.
 
 mod common;
 
 use chickpea::p2g::two_track::{embed_two_track, TwoTrackConfig, TwoTrackInput};
-use common::{gene_positions, index, kernel, program_of, write_fixture, N_CELLS, N_GENES};
+use common::{
+    gene_positions, index, kernel, program_of, write_fixture, N_CELLS, N_GENES, PEAKS_PER_GENE,
+};
 use nalgebra::DMatrix;
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -19,7 +20,7 @@ fn row(m: &DMatrix<f32>, r: usize) -> Vec<f32> {
 }
 
 #[test]
-fn programs_separate_and_a_genes_two_rows_agree() {
+fn programs_separate_on_the_multiome_axis() {
     let dir = tempfile::tempdir().unwrap();
     let (rna, atac) = write_fixture(dir.path());
     let genes = gene_positions();
@@ -32,6 +33,8 @@ fn programs_separate_and_a_genes_two_rows_agree() {
         proj_dim: 8,
         feature_modules: 4,
         phase1_cells_per_pb: 4,
+        // 24 genes < 30 ≤ 48 peaks → ATAC module-only, RNA keeps residuals.
+        module_only_min_rows: 30,
         ..TwoTrackConfig::default()
     };
     let input = TwoTrackInput {
@@ -44,19 +47,12 @@ fn programs_separate_and_a_genes_two_rows_agree() {
     };
     let out = embed_two_track(&input, &cfg).unwrap();
 
-    // Shapes: every gene has an RNA row; every gene here also has cis peaks.
     assert_eq!(out.genes.len(), N_GENES);
     assert_eq!(out.rna_rows.nrows(), N_GENES);
-    assert_eq!(out.atac_rows.nrows(), N_GENES);
+    assert_eq!(out.peak_rows.nrows(), N_GENES * PEAKS_PER_GENE);
+    assert_eq!(out.module_of_peak.len(), out.peak_rows.nrows());
     assert_eq!(out.cell_rows.nrows(), N_CELLS);
-    assert!(out.atac_gene.iter().all(Option::is_some));
 
-    // Pseudobulks: the finest level's rows, and every cell's pseudobulk.
-    assert_eq!(out.cell_to_pb.len(), N_CELLS);
-    assert!(out.cell_to_pb.iter().all(|&u| u < out.pb_rows.nrows()));
-    assert_eq!(out.pb_rows.ncols(), out.rna_rows.ncols());
-
-    // Cells: same-program pairs are closer than cross-program pairs.
     let prog: Vec<usize> = out.barcodes.iter().map(|b| program_of(index(b))).collect();
     let (mut same, mut cross, mut ns, mut nc) = (0f32, 0f32, 0, 0);
     for a in 0..N_CELLS {
@@ -77,22 +73,24 @@ fn programs_separate_and_a_genes_two_rows_agree() {
         "cells: same {same:.3} vs cross {cross:.3}"
     );
 
-    // Genes: a gene's RNA and ATAC rows agree more than an opposite-program pair.
-    let row_of_gene: Vec<usize> = {
-        let mut v = vec![0; N_GENES];
-        for (r, name) in out.genes.iter().enumerate() {
-            v[index(name)] = r;
-        }
-        v
-    };
-    let atac_row = |g: usize| out.atac_gene[row_of_gene[g]].unwrap();
-    let (mut own, mut other) = (0f32, 0f32);
-    for (g, &r) in row_of_gene.iter().enumerate() {
-        let rna = row(&out.rna_rows, r);
-        let opp = (g + 1) % N_GENES; // the next gene is in the other program
-        own += cosine(&rna, &row(&out.atac_rows, atac_row(g)));
-        other += cosine(&rna, &row(&out.atac_rows, atac_row(opp)));
+    // Peaks in the same ATAC module share a row (module_only).
+    let mut by_mod: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    for (p, &m) in out.module_of_peak.iter().enumerate() {
+        by_mod.entry(m).or_default().push(p);
     }
-    let (own, other) = (own / N_GENES as f32, other / N_GENES as f32);
-    assert!(own > other + 0.3, "genes: own {own:.3} vs other {other:.3}");
+    let shared = by_mod.values().any(|v| v.len() > 1);
+    assert!(
+        shared,
+        "expected at least one ATAC module with multiple peaks"
+    );
+    for ps in by_mod.values().filter(|v| v.len() > 1) {
+        let r0 = row(&out.peak_rows, ps[0]);
+        for &p in &ps[1..] {
+            let rp = row(&out.peak_rows, p);
+            assert!(
+                (cosine(&r0, &rp) - 1.0).abs() < 1e-4,
+                "peaks in one module must share μ"
+            );
+        }
+    }
 }

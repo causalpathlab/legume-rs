@@ -1,24 +1,34 @@
-//! The gene-centric embedding: RNA gene rows and peak-aggregated gene rows as
-//! two tracks of one gene axis, fit by the shared two-phase engine.
+//! Gene + peak multiome embedding (bge multiome recipe).
 //!
-//! Peaks never enter training. They are aggregated onto genes once, through
-//! the fixed cis weights ([`super::cis`], [`super::gene_track`]), and written
-//! as `{work}.atac_gene.zarr`. The engine then sees each gene on two tracks:
-//! the RNA row is the base, the peak-aggregated row is the base plus a
-//! ridge-shrunk low-rank offset, and both are scored against the same
-//! pseudobulk embeddings.
+//! Loads RNA genes and ATAC peaks onto one feature axis with modality suffixes.
+//! Wide ATAC is `module_only` (peak row = its module row `μ_m`). Phase 2 is a
+//! single encoder over that axis. The cis pairs go into phase 1 as gates on
+//! the RNA gene scores; their trained weights are the links.
 
 use super::cis::{build_cis_pairs, AbcKernel, CisPairs};
-use super::gene_track::{write_gene_track, PeakToGenes};
-use super::tracks::{gene_tracks, ATAC_TAG, RNA_TAG};
 use crate::common::*;
 use data_beans::sparse_io::open_sparse_matrix_by_path;
 use genomic_data::coordinates::{parse_peak_coordinates, GeneTss};
 use graph_embedding_util as ge;
-use legume_numeric::candle::candle_core::Device;
 use legume_numeric::matrix::traits::ConvertMatOps;
+use rustc_hash::FxHashMap;
 
-/// Knobs of the two-track fit. Defaults follow `senna bge` / `senna gem`.
+/// Suffix of the RNA rows on the joint axis.
+pub const RNA_TAG: &str = "rna";
+/// Suffix of the ATAC peak rows on the joint axis.
+pub const ATAC_TAG: &str = "atac";
+
+/// ATAC modules under this many peaks hold scattered peaks: they join the
+/// near-empty background, which is never a link candidate.
+const ATAC_MIN_MODULE_SIZE: usize = 10;
+/// RNA modules under this many genes (singletons) hold outlier genes: they
+/// join the flat background and go module-only.
+const RNA_MIN_MODULE_SIZE: usize = 2;
+/// ATAC modules never cross a genomic window of this many bp on one
+/// chromosome, so no module sits in every gene's cis window.
+const ATAC_MODULE_WINDOW: i64 = 10_000_000;
+
+/// Knobs of the multiome fit. Defaults follow `senna bge --multiome`.
 #[derive(Debug, Clone)]
 pub struct TwoTrackConfig {
     pub embedding_dim: usize,
@@ -26,16 +36,15 @@ pub struct TwoTrackConfig {
     pub num_levels: usize,
     pub sort_dim: usize,
     pub proj_dim: usize,
-    /// Hard gene partition size for the exact two-level softmax.
+    /// Modules per modality (RNA and ATAC each get this many).
     pub feature_modules: usize,
     pub phase1_cells_per_pb: usize,
-    /// Rank of the peak-aggregated track's gene offset (capped at the dimension).
-    pub offset_rank: usize,
-    /// Ridge pulling a gene's peak-aggregated row toward its RNA row.
-    pub offset_l2: f32,
+    /// On the ATAC modality, module-only when it has at least this many peaks.
+    /// `0` disables. Bge default is 100_000; tests use a small threshold.
+    pub module_only_min_rows: usize,
     pub seed: u64,
-    /// Cells per block when writing the peak-aggregated track.
-    pub block_size: usize,
+    pub device: crate::common::ComputeDevice,
+    pub device_no: usize,
 }
 
 impl Default for TwoTrackConfig {
@@ -46,12 +55,12 @@ impl Default for TwoTrackConfig {
             num_levels: 3,
             sort_dim: 10,
             proj_dim: 50,
-            feature_modules: 128,
+            feature_modules: 1024,
             phase1_cells_per_pb: 16,
-            offset_rank: ge::LoraSpec::default().rank,
-            offset_l2: 1.0,
+            module_only_min_rows: 100_000,
             seed: 42,
-            block_size: 1000,
+            device: crate::common::ComputeDevice::Cpu,
+            device_no: 0,
         }
     }
 }
@@ -60,58 +69,54 @@ impl Default for TwoTrackConfig {
 pub struct TwoTrackInput<'a> {
     pub rna_file: &'a str,
     pub atac_file: &'a str,
-    /// One batch label per barcode-aligned cell, if any.
     pub batch_file: Option<&'a str>,
     pub gene_positions: &'a [Option<GeneTss>],
     pub kernel: &'a AbcKernel,
-    /// Prefix for intermediate files (`{work}.atac_gene.zarr`).
     pub work_prefix: &'a str,
 }
 
-/// The fitted tables, keyed by name.
+/// Fitted tables.
 pub struct TwoTrackEmbedding {
-    /// Genes in RNA-row order.
+    /// Genes in RNA-file order.
     pub genes: Vec<Box<str>>,
-    /// `[genes × H]`, the base (RNA) rows.
+    /// `[genes × H]`, RNA-track composed rows.
     pub rna_rows: nalgebra::DMatrix<f32>,
-    /// `[genes with cis peaks × H]`, the peak-aggregated rows.
-    pub atac_rows: nalgebra::DMatrix<f32>,
-    /// Per gene, its row in `atac_rows` (`None`: no cis peaks).
-    pub atac_gene: Vec<Option<usize>>,
+    /// `[peaks × H]`, each peak's module embedding `μ_{m(p)}`.
+    pub peak_rows: nalgebra::DMatrix<f32>,
+    /// Module id of each peak (ATAC-file order).
+    pub module_of_peak: Vec<u32>,
     /// `[cells × H]`.
     pub cell_rows: nalgebra::DMatrix<f32>,
     pub barcodes: Vec<Box<str>>,
-    /// `[finest pseudobulks × H]`, in the cells' frame.
-    pub pb_rows: nalgebra::DMatrix<f32>,
-    /// Finest pseudobulk of every cell, aligned with `barcodes`.
-    pub cell_to_pb: Vec<usize>,
-    /// The cis pairs over the RNA file's genes and the ATAC file's peaks.
     pub pairs: CisPairs,
-    /// Gene names in RNA-file order (the order of `pairs`' genes).
     pub rna_genes: Vec<Box<str>>,
-    /// Peak names in ATAC-file order (the ids in `pairs.peak`).
     pub peak_names: Vec<Box<str>>,
+    /// Phase-1 cis gate weights `w` in [`CisPairs`] order (`0` if a pair was
+    /// dropped from the engine table).
+    pub gate_w: Vec<f32>,
+    pub gate_theta0: f32,
+    pub gate_theta1: f32,
+    pub gate_theta3: f32,
+    pub gate_gamma1: f32,
+    pub gate_gamma2: f32,
 }
 
 pub fn embed_two_track(
-    inp: &TwoTrackInput,
+    input: &TwoTrackInput,
     cfg: &TwoTrackConfig,
 ) -> anyhow::Result<TwoTrackEmbedding> {
-    //////////////////////////////////////////
-    // Peaks onto genes, once, then on disk //
-    //////////////////////////////////////////
-    let rna = open_sparse_matrix_by_path(inp.rna_file)?;
+    let rna = open_sparse_matrix_by_path(input.rna_file)?;
     let gene_names = rna.row_names()?;
     anyhow::ensure!(
-        inp.gene_positions.len() == gene_names.len(),
+        input.gene_positions.len() == gene_names.len(),
         "{} gene positions for {} RNA rows",
-        inp.gene_positions.len(),
+        input.gene_positions.len(),
         gene_names.len()
     );
-    let atac = open_sparse_matrix_by_path(inp.atac_file)?;
+    let atac = open_sparse_matrix_by_path(input.atac_file)?;
     let peak_names = atac.row_names()?;
     let peaks = parse_peak_coordinates(&peak_names);
-    let pairs = build_cis_pairs(inp.gene_positions, &peaks, inp.kernel);
+    let pairs = build_cis_pairs(input.gene_positions, &peaks, input.kernel);
     info!(
         "Cis pairs: {} genes placed of {}, {} pairs; {} of {} peaks reach no gene \
          ({} unparsed)",
@@ -122,60 +127,86 @@ pub fn embed_two_track(
         peaks.len(),
         pairs.n_unparsed_peaks
     );
-    let track_file = format!("{}.atac_gene.zarr", inp.work_prefix);
-    let map = PeakToGenes::new(&pairs, peaks.len());
-    let summary = write_gene_track(
-        atac.as_ref(),
-        &map,
-        &pairs,
-        &gene_names,
-        &track_file,
-        cfg.block_size,
-    )?;
-    info!(
-        "Peak-aggregated track: {} genes × {} cells, {} nonzeros → {track_file}",
-        summary.n_genes, summary.n_cells, summary.nnz
-    );
     drop((rna, atac));
 
-    /////////////////////////
-    // Two tracks, one fit //
-    /////////////////////////
+    // One axis: RNA genes ∪ ATAC peaks (bge multiome).
     let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
-        data_files: vec![inp.rna_file.into(), track_file.into()],
-        batch_files: inp.batch_file.map(|b| vec![b.into()]),
-        // Both files carry the RNA file's gene names verbatim, so match them
-        // exactly: a gene-symbol rule would rewrite `x_y` names and alias
-        // different genes to one another.
+        data_files: vec![input.rna_file.into(), input.atac_file.into()],
+        batch_files: input.batch_file.map(|b| vec![b.into()]),
+        // Exact: RNA symbols and peak loci are disjoint names. Mixed would
+        // rewrite `GENE_1` → `1` via the gene-symbol rule and break lookup.
         feature_kind: Some(ge::FeatureNameKind::Exact),
-        column_alignment: ColumnAlignment::Union,
+        column_alignment: data_beans::sparse_io_vector::ColumnAlignment::Union,
         per_file_feature_suffix: Some(vec![RNA_TAG.into(), ATAC_TAG.into()]),
         ..Default::default()
     })?;
-    let tracks = gene_tracks(&unified.feature_names)?;
-    // Fail before the fit, not after it, if the load renamed any gene.
-    {
-        let loaded: rustc_hash::FxHashSet<&str> = unified
-            .feature_names
-            .iter()
-            .filter_map(|n| n.rsplit_once('/').map(|(g, _)| g))
-            .collect();
-        let missing = gene_names
-            .iter()
-            .filter(|g| !loaded.contains(g.as_ref()))
-            .count();
-        anyhow::ensure!(
-            missing == 0,
-            "{missing} of {} RNA genes are missing from the loaded axis",
-            gene_names.len()
-        );
+
+    let feature_names = unified.feature_names.clone();
+    let mut rna_feat: FxHashMap<Box<str>, u32> = FxHashMap::default();
+    let mut atac_feat: FxHashMap<Box<str>, u32> = FxHashMap::default();
+    for (r, name) in feature_names.iter().enumerate() {
+        let Some((base, tag)) = name.rsplit_once('/') else {
+            anyhow::bail!("feature `{name}` carries no modality tag");
+        };
+        match tag {
+            RNA_TAG => {
+                rna_feat.insert(base.into(), r as u32);
+            }
+            ATAC_TAG => {
+                atac_feat.insert(base.into(), r as u32);
+            }
+            _ => anyhow::bail!("feature `{name}`: unknown modality `{tag}`"),
+        }
     }
+
+    // ATAC modules stay inside one genomic block; RNA rows have none.
+    let feature_block = {
+        let blocks = super::cis::peak_blocks(&peaks, ATAC_MODULE_WINDOW);
+        let mut per_row = vec![u32::MAX; feature_names.len()];
+        for (p, name) in peak_names.iter().enumerate() {
+            if let Some(&r) = atac_feat.get(name.as_ref()) {
+                per_row[r as usize] = blocks[p];
+            }
+        }
+        Some(per_row)
+    };
+
+    // Cis gates on the unified axis (peak→module resolved inside the fit).
+    let (mut gene_feat, mut peak_feat, mut abc, mut z_log, mut pair_idx) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (g, gene) in gene_names.iter().enumerate() {
+        let Some(&gf) = rna_feat.get(gene.as_ref()) else {
+            continue;
+        };
+        for k in pairs.gene(g) {
+            let p = pairs.peak[k] as usize;
+            let Some(&pf) = atac_feat.get(peak_names[p].as_ref()) else {
+                continue;
+            };
+            gene_feat.push(gf);
+            peak_feat.push(pf);
+            abc.push(pairs.weight[k]);
+            z_log.push(input.kernel.contact(pairs.dist[k]).ln());
+            pair_idx.push(k as u32);
+        }
+    }
+    let mut z_log = nalgebra::DMatrix::from_vec(z_log.len(), 1, z_log);
+    z_log.scale_columns_inplace();
+    let cis_gates = (!gene_feat.is_empty()).then_some(ge::CisGates {
+        gene_feat,
+        peak_feat,
+        abc,
+        z_log_contact: z_log.as_slice().to_vec(),
+    });
+
     let h = cfg.embedding_dim;
+    let device = cfg.device.to_device(cfg.device_no)?;
+    info!("Embedding device: {} (#{})", cfg.device, cfg.device_no);
     let config = ge::FitConfig {
         embedding_dim: h,
         anchor_batches: None,
         bulk_batches: None,
-        emit_finest_collapse: true,
+        emit_finest_collapse: false,
         num_levels: cfg.num_levels,
         sort_dim: cfg.sort_dim,
         knn_pb_samples: 10,
@@ -186,7 +217,7 @@ pub fn embed_two_track(
         batch_size: 1024,
         learning_rate: 0.01,
         seed: cfg.seed,
-        device: Device::Cpu,
+        device,
         block_size: None,
         hvg_weights: None,
         refine: ge::RefineParams::default(),
@@ -194,84 +225,123 @@ pub fn embed_two_track(
         phase1_cells_per_pb: cfg.phase1_cells_per_pb,
         hier_units_per_step: 256,
         hier_modules_per_unit: 8,
-        module_only_min_rows: 0,
+        module_only_min_rows: cfg.module_only_min_rows,
         feature_modules: ge::FeatureModuleArgs {
             feature_modules: Some(cfg.feature_modules),
         }
         .resolve(None)?,
-        tracks: Some(tracks),
-        offset_l2: cfg.offset_l2,
-        offset_rank: cfg.offset_rank.min(h),
+        tracks: None,
+        offset_l2: 0.0,
+        offset_rank: 1,
         preset_features: None,
         preset_offsets: Vec::new(),
         strata: None,
+        cis_gates,
+        flat_module_only: true,
+        multiome: Some(ge::MultiomeOptions {
+            modality_intercepts: true,
+            module_only_min_size: ATAC_MIN_MODULE_SIZE,
+            residual_min_size: RNA_MIN_MODULE_SIZE,
+            feature_block,
+        }),
     };
     let out = ge::fit(&mut unified, config)?;
 
-    ////////////////////////////////
-    // Rows back to genes & cells //
-    ////////////////////////////////
     let feat = nalgebra::DMatrix::<f32>::from_tensor(&out.model.e_feat)?;
-    let spec = gene_tracks(&unified.feature_names)?;
     anyhow::ensure!(
-        feat.nrows() == spec.track_of_row.len(),
-        "{} feature rows for {} named rows",
+        feat.nrows() == unified.feature_names.len(),
+        "{} feature rows for {} names",
         feat.nrows(),
-        spec.track_of_row.len()
+        unified.feature_names.len()
     );
-    let n_genes = spec.n_genes();
-    let mut rna_row_of_gene = vec![usize::MAX; n_genes];
-    let mut atac_row_of_gene = vec![usize::MAX; n_genes];
-    for (r, (&t, &g)) in spec.track_of_row.iter().zip(&spec.gene_of_row).enumerate() {
-        if t == 0 {
-            rna_row_of_gene[g as usize] = r;
-        } else {
-            atac_row_of_gene[g as usize] = r;
-        }
-    }
-    let base = |r: usize| {
-        unified.feature_names[r]
-            .rsplit_once('/')
-            .map_or("", |(n, _)| n)
-    };
-    let genes: Vec<Box<str>> = rna_row_of_gene.iter().map(|&r| base(r).into()).collect();
-    let rna_rows = feat.select_rows(rna_row_of_gene.iter());
-    let with_atac: Vec<usize> = (0..n_genes)
-        .filter(|&g| atac_row_of_gene[g] != usize::MAX)
-        .collect();
-    let atac_rows = feat.select_rows(with_atac.iter().map(|&g| &atac_row_of_gene[g]));
-    let mut atac_gene = vec![None; n_genes];
-    for (k, &g) in with_atac.iter().enumerate() {
-        atac_gene[g] = Some(k);
-    }
-    let cell_rows = nalgebra::DMatrix::<f32>::from_tensor(&out.model.e_cell)?;
-    let pb_rows = out
-        .pb_embeddings
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("the fit returned no pseudobulk embeddings"))?
-        .e_pb
-        .clone();
-    let (_, cell_to_pb) = out
-        .finest_collapse
-        .ok_or_else(|| anyhow::anyhow!("the fit returned no finest collapse"))?;
     anyhow::ensure!(
-        cell_to_pb.len() == cell_rows.nrows(),
-        "{} pseudobulk memberships for {} cells",
-        cell_to_pb.len(),
-        cell_rows.nrows()
+        out.module_labels.len() == feat.nrows(),
+        "{} module labels for {} features",
+        out.module_labels.len(),
+        feat.nrows()
     );
 
+    let mut rna_row_idx = Vec::with_capacity(gene_names.len());
+    for g in &gene_names {
+        let r = *rna_feat
+            .get(g.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("RNA gene `{g}` missing from the loaded axis"))?
+            as usize;
+        rna_row_idx.push(r);
+    }
+    let mut peak_row_idx = Vec::with_capacity(peak_names.len());
+    let mut module_of_peak = Vec::with_capacity(peak_names.len());
+    for p in &peak_names {
+        let r = *atac_feat
+            .get(p.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("peak `{p}` missing from the loaded axis"))?
+            as usize;
+        peak_row_idx.push(r);
+        module_of_peak.push(out.module_labels[r]);
+    }
+
+    let rna_rows = feat.select_rows(rna_row_idx.iter());
+    let peak_rows = feat.select_rows(peak_row_idx.iter());
+    let cell_rows = nalgebra::DMatrix::<f32>::from_tensor(&out.model.e_cell)?;
+
+    let (pairs, gate_w, gate_theta0, gate_theta1, gate_theta3, gate_gamma1, gate_gamma2) =
+        match out.cis_gates.as_ref() {
+            Some(cis) => {
+                anyhow::ensure!(
+                    cis.w.len() == cis.source_idx.len(),
+                    "cis readout has {} weights for {} source indices",
+                    cis.w.len(),
+                    cis.source_idx.len()
+                );
+                // `source_idx` indexes the wired `pair_idx` → original CisPairs.
+                let mut keep = Vec::with_capacity(cis.source_idx.len());
+                for &src in &cis.source_idx {
+                    let k = *pair_idx.get(src as usize).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cis source_idx {src} out of range ({} wired pairs)",
+                            pair_idx.len()
+                        )
+                    })?;
+                    keep.push(k);
+                }
+                debug_assert!(keep.windows(2).all(|w| w[0] <= w[1]));
+                let pairs = pairs.keep_indices(&keep);
+                anyhow::ensure!(
+                    pairs.n_pairs() == cis.w.len(),
+                    "pruned pairs {} != gate weights {}",
+                    pairs.n_pairs(),
+                    cis.w.len()
+                );
+                (
+                    pairs,
+                    cis.w.clone(),
+                    cis.theta0,
+                    cis.theta1,
+                    cis.theta3,
+                    cis.gamma1,
+                    cis.gamma2,
+                )
+            }
+            None => {
+                let w = pairs.weight.clone();
+                (pairs, w, 0.0, 0.0, 0.0, 0.0, 1.0)
+            }
+        };
     Ok(TwoTrackEmbedding {
-        genes,
+        genes: gene_names.clone(),
         rna_rows,
-        atac_rows,
-        atac_gene,
+        peak_rows,
+        module_of_peak,
         cell_rows,
         barcodes: unified.barcodes.clone(),
-        pb_rows,
-        cell_to_pb,
         pairs,
         rna_genes: gene_names,
         peak_names,
+        gate_w,
+        gate_theta0,
+        gate_theta1,
+        gate_theta3,
+        gate_gamma1,
+        gate_gamma2,
     })
 }

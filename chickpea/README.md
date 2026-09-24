@@ -5,12 +5,25 @@
 
 Peak-to-gene cis-regulatory linkage from paired single-cell RNA + ATAC.
 
-Peaks enter as gene features. Each gene gets an ATAC version, its cis peaks'
-counts aggregated through ABC contact weights, and the gene axis carries two
-tracks: RNA and peak-aggregated. Both are embedded against the same pseudobulk
-embeddings, with the ATAC row tied to the RNA row by a ridge-shrunk low-rank
-offset. Each gene then attends over its own cis peaks, and the attention shares
-are the links. The design and its checks are in [`docs/plan.md`](docs/plan.md).
+RNA genes and ATAC peaks share one multiome feature axis, embedded like
+`senna bge --multiome`: a wide ATAC modality is module-only, so each peak's row
+is its module's row. Inside the phase-1 fit, every gene's RNA score mixes in
+the predicted accessibility of its cis peaks through ReLU gates, and the
+trained gate weights are the links. The design is in
+[`docs/design.md`](docs/design.md).
+
+## Model
+
+```text
+λ_u,m = ⟨e_u, μ_m⟩ + b_m + β_u,k(m)                       # module score, β per-unit modality intercept
+w_gp  = abc_gp · max(0, θ₀ + θ₁ z(log contact_gp) + θ₃ ⟨μ_{m(p)}, ρ_g⟩)
+a_ug  = Σ_p w_gp (⟨e_u, μ_{m(p)}⟩ + b_{m(p)})              # predicted, not raw ATAC
+η_ug  = γ₂ · ρ_ug + γ₁ · a_ug                            # the RNA gene score
+```
+
+`θ` and `γ` are shared by every gene. `w` is unit-free, and cell context comes
+in through `e_u`. `β` keeps each unit's ATAC:RNA count split out of the
+embedding.
 
 ## Pipeline
 
@@ -20,20 +33,19 @@ are the links. The design and its checks are in [`docs/plan.md`](docs/plan.md).
    gene's TSS, at most `--max-cis` per gene, nearest first. Each pair carries
    the ABC contact `(d + c)^-γ`, normalised over the gene's candidates. A peak
    near several genes is a candidate for each.
-2. **Peak-aggregated track.** Every cell's peak counts summed onto genes through
-   those weights, streamed once over the ATAC counts.
-3. **Two-track embedding.** RNA gene rows (the base track) and peak-aggregated
-   rows (base plus offset), trained with the shared two-phase engine: an exact
-   two-level softmax over multilevel pseudobulks, then per-cell embeddings.
-4. **Peak rows.** Every peak folded in against the finest pseudobulk
-   embeddings by one Poisson IRLS step, all peaks at once, streamed from cells.
-5. **Localized attention.** Each gene scores its cis peaks by a learned distance
-   kernel plus a low-rank content term between gene and peak rows. The pooled
-   peak rows are trained to agree with the gene's RNA row. Only the kernel and
-   the content map train; nothing is genes × peaks.
-6. **Per-cluster links.** Cells are clustered (Leiden), and each gene's shares
-   are re-weighted by each cluster's peak accessibility. Fixed ABC shares are
-   reported alongside as the baseline.
+2. **Multiome embedding.** RNA genes and ATAC peaks on one axis, trained with
+   the shared two-phase engine: an exact two-level softmax over multilevel
+   pseudobulks, then one cell encoder over the joint axis. Modules are
+   modality-pure. Flat features (one rate explains their counts) and
+   scattered ones (RNA singletons, ATAC groups under ten peaks) form each
+   modality's background and go module-only. ATAC modules never cross a 10 Mb
+   genomic window.
+3. **Gates.** After the partition, pairs of module-only genes and pairs to the
+   ATAC background are dropped. The gate scalars train inside phase 1, on the
+   RNA gene-level likelihood.
+4. **Per-cluster links.** Cells are clustered (Leiden), and each gene's gate
+   shares are re-weighted by each cluster's peak accessibility. Fixed ABC shares
+   are reported alongside as the baseline.
 
 Cell QC (on by default, driven by the RNA counts) leaves failed cells in the
 embedding but out of clustering, accessibility rates and every cell table.
@@ -59,11 +71,12 @@ Key options (see `chickpea peak-to-gene --help` for all):
 | `--batch` | — | batch labels, one per barcode |
 | `--cis-window` | 500000 | max peak-midpoint distance (bp) to a TSS |
 | `--max-cis` | 200 | cap on candidate peaks per gene (nearest) |
-| `--contact-gamma`, `--contact-pseudocount` | 1, 5000 | initial ABC contact `(d + c)^-γ` |
+| `--contact-gamma`, `--contact-pseudocount` | 1, 5000 | ABC contact `(d + c)^-γ` |
 | `--embedding-dim` | 128 | embedding dimension |
 | `--epochs` | 1000 | embedding epochs |
-| `--offset-rank`, `--offset-l2` | 16, 1.0 | rank and ridge tying a gene's ATAC row to its RNA row |
-| `--attention-rank`, `--attention-epochs` | 16, 100 | attention content map rank and epochs |
+| `--feature-modules` | 1024 | modules per modality (RNA and ATAC) |
+| `--module-only-min-rows` | 100000 | ATAC goes module-only at this many peaks (0 = off) |
+| `--device`, `--device-no` | cpu, 0 | compute device (`cpu`, `cuda`, `metal`) |
 | `--n-clusters` | Leiden | target number of cell clusters |
 | `-o`, `--out` | — | output prefix |
 
@@ -71,13 +84,11 @@ Outputs, all `{out}.*.parquet`:
 
 | File | Contents |
 |------|----------|
-| `links` | one row per cis pair: `gene`, `peak`, `distance`, `abc`, `attention` (shares sum to 1 per gene) |
-| `links_by_cluster` | `gene`, `peak`, `cluster`, `attention`, `abc`: shares within each cell cluster |
-| `gene_embedding`, `gene_atac_embedding` | RNA and peak-aggregated gene rows |
-| `peak_embedding`, `peaks` | folded-in peak rows; `peak`, `chromosome`, `start`, `end`, `bias` |
+| `links` | one row per kept cis pair: `gene`, `peak`, `distance`, `abc`, `gate` (the trained `w`; `0` for a closed pair) |
+| `links_by_cluster` | `gene_idx`, `peak_idx`, `cluster`, `gate`, `abc`: shares within each cell cluster (indices into the RNA / peak axes) |
+| `gene_embedding` | RNA gene rows |
+| `peak_embedding`, `peaks` | each peak's module row; `peak`, `chromosome`, `start`, `end` |
 | `cell_embedding`, `cell_clusters` | per-cell rows; `cell`, `cluster` |
-
-`{out}.atac_gene.zarr` holds the peak-aggregated gene counts.
 
 ### Simulation
 
