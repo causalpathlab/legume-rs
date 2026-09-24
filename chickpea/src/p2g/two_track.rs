@@ -50,6 +50,9 @@ pub struct TwoTrackConfig {
     pub align_weight: f32,
     /// Share of each cis gene's score taken from its cis peaks (`0` off).
     pub mix: f32,
+    /// L2 weight decay on the gene and peak embedding rows (`0` off); the
+    /// pseudobulk rows never decay.
+    pub weight_decay: f64,
     pub seed: u64,
     pub device: crate::common::ComputeDevice,
     pub device_no: usize,
@@ -69,6 +72,7 @@ impl Default for TwoTrackConfig {
             module_only_min_rows: 100_000,
             align_weight: 0.1,
             mix: 0.5,
+            weight_decay: 1e-4,
             seed: 42,
             device: crate::common::ComputeDevice::Cpu,
             device_no: 0,
@@ -239,7 +243,9 @@ pub fn embed_two_track(
         block_size: None,
         hvg_weights: None,
         refine: ge::RefineParams::default(),
-        weight_decay: 0.0,
+        weight_decay: cfg.weight_decay,
+        // The feature rows only: the pseudobulk and unit rows never decay.
+        unit_weight_decay: Some(0.0),
         phase1_cells_per_pb: cfg.phase1_cells_per_pb,
         hier_units_per_step: 256,
         hier_modules_per_unit: 8,
