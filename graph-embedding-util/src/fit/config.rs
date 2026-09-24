@@ -290,6 +290,39 @@ pub struct FitConfig {
     /// Per-cell CNV stratum (`0` = mixable). Maps to
     /// [`MultilevelParams::strata`]. `None` is the pre-strata collapse path.
     pub strata: Option<Vec<usize>>,
+    /// Optional cis peak→gene gates mixed into the RNA gene-level scores.
+    /// `None` keeps today's residual-only gene logits (bge / gem).
+    pub cis_gates: Option<crate::fit::hier::CisGates>,
+    /// FLAT feature rows go module-only: no residual, so the gene-level softmax
+    /// never scores them. A feature is flat when one rate explains its counts
+    /// over the finest pseudobulks (a Poisson homogeneity test; see
+    /// [`crate::fit::module_partition::flat_module_only`]); they form the
+    /// coarsener's background group. Opt-in; ignored on a multi-track axis.
+    pub flat_module_only: bool,
+    /// Options of the modality-pure multiome partition and module level.
+    /// `None` keeps the plain multiome fit.
+    pub multiome: Option<MultiomeOptions>,
+}
+
+/// Opt-in options of a multiome fit (applied on the modality-pure partition).
+#[derive(Clone, Debug, Default)]
+pub struct MultiomeOptions {
+    /// One intercept per unit and non-reference modality on the module
+    /// scores, so a unit's split of counts across modalities is not written
+    /// into the embedding (see [`crate::fit::hier::params::GroupIntercepts`]).
+    pub modality_intercepts: bool,
+    /// On a module-only modality, modules of fewer features than this hold
+    /// scattered features: they join the modality's background, and the freed
+    /// slots split the largest modules (see
+    /// [`crate::fit::module_partition::partition_modules_min_size`]). The
+    /// background is then no cis candidate. `0` keeps the plain partition.
+    pub module_only_min_size: usize,
+    /// The same on a residual modality (singletons at `2`); the background's
+    /// features go module-only. `0` keeps the plain partition.
+    pub residual_min_size: usize,
+    /// Per feature row, a BLOCK no module may cross (e.g. a genomic window of
+    /// ATAC peaks); `u32::MAX` for a row with no block. `None`: no blocks.
+    pub feature_block: Option<Vec<u32>>,
 }
 
 /// The one rule on [`FitConfig::offset_rank`]: `1..=h`, `h` being the
@@ -393,6 +426,11 @@ pub struct FitOutput {
     /// Per-cell intercept of each non-base track (tracks `1..T`, `[n_cells]`
     /// each); empty on a one-track axis.
     pub track_intercepts: Vec<Vec<f32>>,
+    /// Hard module id of every feature row (phase-1 partition). Length
+    /// `n_features`. Module-only modalities share one embedding per id.
+    pub module_labels: Vec<u32>,
+    /// Phase-1 cis gates (θ, γ, `w`) when [`FitConfig::cis_gates`] was set.
+    pub cis_gates: Option<crate::fit::hier::CisGateReadout>,
 }
 
 #[cfg(test)]

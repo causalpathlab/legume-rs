@@ -228,6 +228,9 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             preset_features,
             preset_offsets,
             strata,
+            cis_gates: None,
+            flat_module_only: false,
+            multiome: None,
         })
     };
 

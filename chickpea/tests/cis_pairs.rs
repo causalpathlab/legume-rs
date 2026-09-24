@@ -40,7 +40,6 @@ fn fixture() -> (Vec<Option<GeneTss>>, Vec<Option<PeakCoord>>) {
 fn kernel() -> AbcKernel {
     AbcKernel {
         window: 15_000,
-        max_per_gene: 200,
         ..AbcKernel::default()
     }
 }
@@ -115,13 +114,55 @@ fn peaks_that_reach_no_gene_are_counted() {
 }
 
 #[test]
-fn the_per_gene_cap_keeps_the_nearest_peaks() {
+fn the_distance_window_keeps_every_in_window_peak() {
+    // Cap lives in phase-1 (initial ⟨μ,ρ⟩), not in the distance scan.
     let (genes, peaks) = fixture();
+    let pairs = build_cis_pairs(&genes, &peaks, &kernel());
+    assert_eq!(peaks_of(&pairs, 0), vec![0, 1]);
+}
+
+/// At most `max_per_gene` candidates per gene, nearest first, in ascending
+/// peak order, and the ABC contact renormalised over the ones kept.
+#[test]
+fn the_cap_keeps_the_nearest_candidates() {
+    let genes = vec![gene("chr1", 50_000)];
+    let peaks = vec![
+        peak("chr1", 30_000, 30_200), // 19.9 kb
+        peak("chr1", 49_900, 50_100), // at the TSS
+        peak("chr1", 55_000, 55_200), // 5.1 kb
+        peak("chr1", 90_000, 90_200), // 40.1 kb
+    ];
     let k = AbcKernel {
-        max_per_gene: 1,
-        ..kernel()
+        window: 100_000,
+        max_per_gene: 2,
+        ..AbcKernel::default()
     };
     let pairs = build_cis_pairs(&genes, &peaks, &k);
-    assert_eq!(peaks_of(&pairs, 0), vec![0]);
-    assert_eq!(pairs.weight[pairs.gene(0)], [1.0]);
+    assert_eq!(peaks_of(&pairs, 0), vec![1, 2]);
+    let w: f32 = pairs.weight[pairs.gene(0)].iter().sum();
+    assert!((w - 1.0).abs() < 1e-6, "kept weights sum to {w}");
+    let want = k.contact(0) / (k.contact(0) + k.contact(5_100));
+    assert!((pairs.weight[pairs.gene(0)][0] - want).abs() < 1e-6);
+}
+
+/// Peaks map to genomic blocks: chromosome × `window`-bp bins by midpoint,
+/// with every unparsed peak in one shared block.
+#[test]
+fn peaks_fall_in_chromosome_window_blocks() {
+    let peaks = vec![
+        peak("chr1", 100, 300),             // chr1 bin 0
+        peak("chr1", 900_000, 900_200),     // chr1 bin 0
+        peak("chr1", 1_500_000, 1_500_200), // chr1 bin 1
+        peak("chr2", 100, 300),             // chr2 bin 0
+        peak("2", 900_000, 900_200),        // chr2 bin 0, no `chr` prefix
+        None,
+        None,
+    ];
+    let b = chickpea::p2g::cis::peak_blocks(&peaks, 1_000_000);
+    assert_eq!(b[0], b[1]);
+    assert_ne!(b[0], b[2]);
+    assert_ne!(b[0], b[3]);
+    assert_eq!(b[3], b[4]);
+    assert_eq!(b[5], b[6]);
+    assert!(b[..5].iter().all(|&x| x != b[5]));
 }

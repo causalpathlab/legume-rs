@@ -2,10 +2,13 @@
 //! the multiome simulator writes them.
 
 use crate::common::*;
-use genomic_data::coordinates::GeneTss;
+use genomic_data::coordinates::{align_gene_tss, GeneTss};
 
 /// Load gene TSS positions from a simple TSV file (gene\tchr\ttss).
 /// Produced by sim-link as {out}.gene_coords.tsv.gz.
+///
+/// Matching uses [`align_gene_tss`] (`GeneIndexResolver`: ENSG / HGNC /
+/// `ENSG…_SYMBOL`), same as the GFF path.
 pub fn load_gene_coords_tsv(
     path: &str,
     gene_names: &[Box<str>],
@@ -38,11 +41,7 @@ pub fn load_gene_coords_tsv(
         gene_names.len()
     );
 
-    let result: Vec<Option<GeneTss>> = gene_names
-        .iter()
-        .map(|name| tss_map.get(name).cloned())
-        .collect();
-
+    let result = align_gene_tss(gene_names, &tss_map);
     let matched = result.iter().filter(|x| x.is_some()).count();
     info!(
         "Matched {}/{} genes to coordinates",
