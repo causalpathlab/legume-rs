@@ -30,6 +30,7 @@ Alternatively, you can install individual binaries:
 ```sh
 cargo install data-beans
 cargo install faba
+cargo install mung-cnv
 cargo install --path senna
 cargo install --path pinto
 cargo install --path cocoa
@@ -43,6 +44,11 @@ Basic utility functions for processing sparse matrices from single-cell omics da
 ### faba
 **FABA**: Feature statistics Accumulator for Base-pair-level Analysis — lives in
 [`causalpathlab/faba`](https://github.com/causalpathlab/faba) (`cargo install faba`).
+
+### mung
+**MUNG**: Malignancy Unmixing on Normalized Genomes with CNV estimation — lives in
+[`causalpathlab/mung-cnv`](https://github.com/causalpathlab/mung-cnv)
+(`cargo install mung-cnv`).
 
 ### senna
 **SENNA**: Stochastic data Embedding with Nearest Neighbourhood Adjustment - embedding and dimensionality reduction tools.
