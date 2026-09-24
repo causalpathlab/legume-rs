@@ -1,6 +1,6 @@
 # legume-genomic-types
 
-Shared genomic types and parsers used by [legume-rs](https://github.com/causalpathlab/legume-rs) tools (`faba`, `senna`, `chickpea`, `cnv`, …):
+Shared genomic types and parsers used by [legume-rs](https://github.com/causalpathlab/legume-rs) tools (`faba`, `senna`, `chickpea`, [`mung-cnv`](https://github.com/causalpathlab/mung-cnv), …):
 
 - GFF/GTF parsing
 - BED intervals

@@ -5,11 +5,15 @@
   [`causalpathlab/fqtl-rs`](https://github.com/causalpathlab/fqtl-rs) (`fqtl` binary).
 - **faba** (Feature statistics Accumulator for Base-pair-level Analysis) now lives in
   [`causalpathlab/faba`](https://github.com/causalpathlab/faba) (`cargo install faba`).
+- **mung** (Malignancy Unmixing on Normalized Genomes with CNV estimation) now lives in
+  [`causalpathlab/mung-cnv`](https://github.com/causalpathlab/mung-cnv)
+  (`cargo install mung-cnv`).
 - Shared libraries are published separately:
   [`legume-numeric`](https://crates.io/crates/legume-numeric),
   [`data-beans`](https://crates.io/crates/data-beans),
   [`hsblock-rs`](https://crates.io/crates/hsblock-rs),
-  [`legume-genomic-types`](https://crates.io/crates/legume-genomic-types).
+  [`legume-genomic-types`](https://crates.io/crates/legume-genomic-types),
+  [`mung-cnv`](https://crates.io/crates/mung-cnv) (Rust lib `cnv`).
 
 ## Installation
 
@@ -37,7 +41,7 @@ cargo install --path senna      # Stochastic data Embedding with Nearest Neighbo
 cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
 cargo install --path lupin      # Lexicon-Using Projection for Identity Naming (text, annotate, lineage, describe)
 cargo install --path cocoa      # COunterfactual COnfounder Adjustment
-cargo install --path cnv        # mung — Malignancy Unmixing on Normalized Genomes (inferCNV-style clone strata)
+cargo install mung-cnv          # mung — Malignancy Unmixing on Normalized Genomes with CNV estimation
 ```
 
 ### Backend selection
