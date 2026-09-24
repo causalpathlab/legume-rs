@@ -68,11 +68,16 @@ enum Commands {
         long_about = "Link ATAC peaks to RNA genes.\n\
                       \n\
                       RNA genes and ATAC peaks are embedded on one multiome axis\n\
-                      (ATAC module-only, like senna bge --multiome). Cis ABC pairs\n\
-                      are scored with ReLU gates: contact × agreement of the peak's\n\
-                      module row with the gene row. Gate weights are the links.\n\
+                      (ATAC module-only, like senna bge --multiome). Each gene's\n\
+                      score mixes in the accessibility of its cis peaks, pooled\n\
+                      through ReLU gates on distance (--mix), and its profile is\n\
+                      pulled toward it (--align-weight), so genes and peaks share\n\
+                      one feature space.\n\
+                      A link's score is its gate times the correlation across\n\
+                      pseudobulks of the peak module's score and the gene's.\n\
                       \n\
-                      {out}.links.parquet has gene, peak, distance, abc and gate.\n\
+                      {out}.links.parquet has gene, peak, distance, abc, gate,\n\
+                      corr and score (gate × corr).\n\
                       {out}.links_by_cluster.parquet has gene_idx/peak_idx/cluster shares.\n\
                       Gene, peak and cell embeddings and cell clusters are written too.",
         after_long_help = ENV_HELP,

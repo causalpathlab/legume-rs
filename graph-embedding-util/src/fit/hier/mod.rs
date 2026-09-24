@@ -9,7 +9,7 @@ pub mod step;
 pub mod train;
 pub mod units;
 
-pub use cis_gates::{CisGateReadout, CisGates};
+pub use cis_gates::{CisCoupling, CisGateReadout, CisGates};
 pub use params::PresetGenes;
 pub use train::{train, HierConfig, HierOutput};
 pub use units::UnitTable;

@@ -58,6 +58,29 @@ pub struct PeakToGeneArgs {
     #[arg(long, default_value_t = 5000.0, help = "Contact pseudocount c (bp)")]
     contact_pseudocount: f32,
 
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Weight of the gene-to-cis-peak alignment, per unit",
+        long_help = "Weight of the gene-to-cis-peak alignment, per unit.\n\
+                     Pulls each gene's profile across pseudobulks toward the\n\
+                     predicted accessibility of its cis peaks, so genes and\n\
+                     peaks share one feature space. 0 turns it off."
+    )]
+    align_weight: f32,
+
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Share of each gene's score taken from its cis peaks, in [0, 1)",
+        long_help = "Share of each gene's score taken from its cis peaks, in [0, 1).\n\
+                     A gene with cis pairs scores (1 − mix) of its own row plus\n\
+                     mix of its cis peaks' predicted accessibility, and the\n\
+                     written gene rows carry the same mixture. 0 keeps the gene\n\
+                     likelihood exact."
+    )]
+    mix: f32,
+
     /* Multiome embedding (bge multiome recipe) */
     #[arg(long, default_value_t = 128, help = "Embedding dimension")]
     embedding_dim: usize,
@@ -78,12 +101,18 @@ pub struct PeakToGeneArgs {
     #[arg(long, default_value_t = 50, help = "Random projection dimension")]
     proj_dim: usize,
 
+    #[arg(long, default_value_t = 1024, help = "RNA gene modules")]
+    feature_modules: usize,
+
     #[arg(
         long,
-        default_value_t = 1024,
-        help = "Modules per modality (RNA and ATAC)"
+        default_value_t = 10_000,
+        help = "ATAC peak modules",
+        long_help = "ATAC peak modules. Each peak's row is its module's row, so\n\
+                     this sets how finely peaks resolve; on the order of the\n\
+                     genes with their own rows keeps the two sides comparable."
     )]
-    feature_modules: usize,
+    peak_modules: usize,
 
     #[arg(
         long,
@@ -174,8 +203,11 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             sort_dim: args.sort_dim,
             proj_dim: args.proj_dim,
             feature_modules: args.feature_modules,
+            peak_modules: args.peak_modules,
             phase1_cells_per_pb: args.phase1_cells_per_pb,
             module_only_min_rows: args.module_only_min_rows,
+            align_weight: args.align_weight,
+            mix: args.mix,
             seed: args.seed,
             device: args.device.clone(),
             device_no: args.device_no,

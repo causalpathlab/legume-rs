@@ -17,6 +17,7 @@ fn small() -> LinkConfig {
             sort_dim: 3,
             proj_dim: 8,
             feature_modules: 4,
+            peak_modules: 4,
             phase1_cells_per_pb: 4,
             module_only_min_rows: 30,
             ..TwoTrackConfig::default()
@@ -47,16 +48,10 @@ fn the_workflow_writes_consistent_tables() {
         "{n_pairs} pairs"
     );
     assert!(summary.n_clusters >= 2, "{} clusters", summary.n_clusters);
-    assert!(
-        summary.gamma2.is_finite() && summary.gamma2 > 0.0,
-        "γ2 should stay warm: γ1={} γ2={}",
-        summary.gamma1,
-        summary.gamma2
-    );
     assert!(summary.theta0.is_finite(), "θ0={}", summary.theta0);
-    // The gates train: the shared scalars leave their start (θ₀ = 1, θ₃ = ½, γ₁ = 0.01).
-    let moved =
-        (summary.theta0 - 1.0).abs() + (summary.theta3 - 0.5).abs() + (summary.gamma1 - 0.01).abs();
+    assert!(summary.align_gap.is_finite(), "gap {}", summary.align_gap);
+    // The gates train: the shared scalars leave their start (θ₀ = 1, θ₁ = ½).
+    let moved = (summary.theta0 - 1.0).abs() + (summary.theta1 - 0.5).abs();
     assert!(moved > 1e-3, "the gates never moved: {summary:?}");
 
     for stem in [
@@ -73,17 +68,36 @@ fn the_workflow_writes_consistent_tables() {
     }
 
     let links = format!("{out}.links.parquet");
-    let (s, n) =
-        read_table_columns(&links, &["gene", "peak"], &["distance", "abc", "gate"]).unwrap();
+    let (s, n) = read_table_columns(
+        &links,
+        &["gene", "peak"],
+        &["distance", "abc", "gate", "corr", "score"],
+    )
+    .unwrap();
     assert_eq!(s[0].len(), n_pairs);
     let mut per_gene: HashMap<&str, f64> = HashMap::new();
+    let mut gate_per_gene: HashMap<&str, f64> = HashMap::new();
     for (i, g) in s[0].iter().enumerate() {
         *per_gene.entry(g).or_default() += n[1][i];
+        *gate_per_gene.entry(g).or_default() += n[2][i];
         assert!(n[2][i] >= 0.0, "gate weight negative");
+        // The link score is the distance prior times the data's evidence.
+        assert!(n[3][i].abs() <= 1.0 + 1e-5, "corr {}", n[3][i]);
+        assert!(
+            (n[4][i] - n[2][i] * n[3][i]).abs() < 1e-5,
+            "score {} ≠ gate {} × corr {}",
+            n[4][i],
+            n[2][i],
+            n[3][i]
+        );
     }
     assert!(!per_gene.is_empty() && per_gene.len() <= N_GENES);
     for (g, abc) in per_gene {
         assert!((abc - 1.0).abs() < 1e-5, "{g}: ABC sums to {abc}");
+    }
+    // The gate is the gene's share of each pair in its ATAC half.
+    for (g, gate) in gate_per_gene {
+        assert!((gate - 1.0).abs() < 1e-4, "{g}: gate shares sum to {gate}");
     }
 
     // Per cluster: ABC (and renormalised gate) shares sum to 1 per gene.

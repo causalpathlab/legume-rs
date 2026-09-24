@@ -290,9 +290,9 @@ pub struct FitConfig {
     /// Per-cell CNV stratum (`0` = mixable). Maps to
     /// [`MultilevelParams::strata`]. `None` is the pre-strata collapse path.
     pub strata: Option<Vec<usize>>,
-    /// Optional cis peak→gene gates mixed into the RNA gene-level scores.
-    /// `None` keeps today's residual-only gene logits (bge / gem).
-    pub cis_gates: Option<crate::fit::hier::CisGates>,
+    /// Optional cis peak→gene coupling: pairs, mixture share and alignment
+    /// weight. `None` keeps the plain fit (bge / gem).
+    pub cis_gates: Option<crate::fit::hier::CisCoupling>,
     /// FLAT feature rows go module-only: no residual, so the gene-level softmax
     /// never scores them. A feature is flat when one rate explains its counts
     /// over the finest pseudobulks (a Poisson homogeneity test; see
@@ -311,18 +311,23 @@ pub struct MultiomeOptions {
     /// scores, so a unit's split of counts across modalities is not written
     /// into the embedding (see [`crate::fit::hier::params::GroupIntercepts`]).
     pub modality_intercepts: bool,
-    /// On a module-only modality, modules of fewer features than this hold
-    /// scattered features: they join the modality's background, and the freed
-    /// slots split the largest modules (see
-    /// [`data_beans::alg::feature_coarsening::partition_features`]). The
-    /// background is then no cis candidate. `0` keeps the plain partition.
-    pub module_only_min_size: usize,
-    /// The same on a residual modality (singletons at `2`); the background's
-    /// features go module-only. `0` keeps the plain partition.
-    pub residual_min_size: usize,
+    /// On a module-only modality, flag its background of flat and near-empty
+    /// features (no cis candidate): `Some(k)` also sets aside modules of fewer
+    /// than `k` features as scattered, their freed slots splitting the largest
+    /// modules (see [`data_beans::alg::feature_coarsening::partition_features`]);
+    /// `Some(0)` sets nothing aside by size, so an active single feature keeps
+    /// its module. `None` keeps the plain partition with nothing flagged.
+    pub module_only_min_size: Option<usize>,
+    /// The same on a residual modality (singletons at `Some(2)`); the
+    /// background's features go module-only.
+    pub residual_min_size: Option<usize>,
     /// Per feature row, a BLOCK no module may cross (e.g. a genomic window of
     /// ATAC peaks); `u32::MAX` for a row with no block. `None`: no blocks.
     pub feature_block: Option<Vec<u32>>,
+    /// Module budget of each module-only modality (e.g. ATAC peaks, whose rows
+    /// are their modules'). `None`: the feature-module count, as the residual
+    /// modalities take.
+    pub module_only_modules: Option<usize>,
 }
 
 /// The one rule on [`FitConfig::offset_rank`]: `1..=h`, `h` being the

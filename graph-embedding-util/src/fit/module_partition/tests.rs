@@ -209,8 +209,8 @@ fn partition_by_group_never_mixes_groups() {
     let group: Vec<u32> = (0..counts.nrows())
         .map(|i| u32::from(i >= a.nrows()))
         .collect();
-    let part =
-        partition_modules_by_group(&counts, &sizes, &group, &[3, 3], &[0, 0], None, 5).unwrap();
+    let part = partition_modules_by_group(&counts, &sizes, &group, &[3, 3], &[None, None], None, 5)
+        .unwrap();
     let (labels, n) = (part.labels, part.n_modules);
     assert_eq!(n, 6);
     assert!(labels[..a.nrows()].iter().all(|&m| m < 3), "{labels:?}");
@@ -218,6 +218,28 @@ fn partition_by_group_never_mixes_groups() {
         labels[a.nrows()..].iter().all(|&m| (3..6).contains(&m)),
         "{labels:?}"
     );
+}
+
+/// Groups may take different budgets: each group's modules are numbered
+/// after the previous groups', within its own budget.
+#[test]
+fn partition_by_group_takes_a_budget_per_group() {
+    let (a, sizes) = planted(2, 6, 4, 4, 16, 1);
+    let (b, _) = planted(2, 6, 4, 4, 16, 2);
+    let mut counts = DMatrix::<f32>::zeros(a.nrows() + b.nrows(), a.ncols());
+    counts.rows_mut(0, a.nrows()).copy_from(&a);
+    counts.rows_mut(a.nrows(), b.nrows()).copy_from(&b);
+    let group: Vec<u32> = (0..counts.nrows())
+        .map(|i| u32::from(i >= a.nrows()))
+        .collect();
+    let part = partition_modules_by_group(&counts, &sizes, &group, &[2, 5], &[None, None], None, 5)
+        .unwrap();
+    assert_eq!(part.n_modules, 7);
+    assert!(part.labels[..a.nrows()].iter().all(|&m| m < 2));
+    assert!(part.labels[a.nrows()..]
+        .iter()
+        .all(|&m| (2..7).contains(&m)));
+    assert_eq!(module_groups(&[2, 5]), vec![0, 0, 1, 1, 1, 1, 1]);
 }
 
 /// The background-to-module-only switch is opt-in: off, nothing is flagged.
@@ -294,7 +316,8 @@ fn partition_by_group_reports_background_modules() {
     let n = counts.nrows();
     let group: Vec<u32> = vec![1; n];
     let part =
-        partition_modules_by_group(&counts, &sizes, &group, &[3, 8], &[0, 4], None, 5).unwrap();
+        partition_modules_by_group(&counts, &sizes, &group, &[3, 8], &[None, Some(4)], None, 5)
+            .unwrap();
     assert_eq!(part.n_modules, 11);
     assert_eq!(part.background.len(), 11);
     let bg: Vec<u32> = (0..11u32)
@@ -303,6 +326,36 @@ fn partition_by_group_reports_background_modules() {
     assert_eq!(bg.len(), 1, "one background module for group 1: {bg:?}");
     for i in d0..n {
         assert_eq!(part.labels[i], bg[0]);
+    }
+}
+
+/// With no size minimum (`Some(0)`) the background is chosen by activity
+/// alone: flat and near-empty rows form the flagged background, while a
+/// single row with strong, specific activity — a peak doing the heavy lifting
+/// on its own — keeps a module of its own.
+#[test]
+fn without_a_size_minimum_the_background_is_chosen_by_activity_alone() {
+    let (counts, sizes, d0) = planted_with_scattered(4);
+    let n = counts.nrows();
+    let group: Vec<u32> = vec![0; n];
+    let part =
+        partition_modules_by_group(&counts, &sizes, &group, &[12], &[Some(0)], None, 5).unwrap();
+    let bg: Vec<u32> = (0..12u32)
+        .filter(|&m| part.background[m as usize])
+        .collect();
+    assert_eq!(bg.len(), 1, "one flagged background: {bg:?}");
+    // `planted(3, 10, 5, 10, ..)`: rows 30..45 are flat or never counted.
+    for i in 30..45 {
+        assert_eq!(
+            part.labels[i], bg[0],
+            "flat/empty row {i} not in background"
+        );
+    }
+    for i in d0..n {
+        assert_ne!(
+            part.labels[i], bg[0],
+            "active single row {i} sent to background"
+        );
     }
 }
 
