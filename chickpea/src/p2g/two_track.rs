@@ -2,8 +2,9 @@
 //!
 //! Loads RNA genes and ATAC peaks onto one feature axis with modality suffixes.
 //! Wide ATAC is `module_only` (peak row = its module row `μ_m`). Phase 2 is a
-//! single encoder over that axis. The cis pairs go into phase 1 as gates on
-//! the RNA gene scores; their trained weights are the links.
+//! single encoder over that axis. The cis pairs go into phase 1 as gates
+//! pooling each gene's cis peaks, which its profile is aligned to; their
+//! trained shares are the links.
 
 use super::cis::{build_cis_pairs, AbcKernel, CisPairs};
 use crate::common::*;
@@ -18,12 +19,13 @@ pub const RNA_TAG: &str = "rna";
 /// Suffix of the ATAC peak rows on the joint axis.
 pub const ATAC_TAG: &str = "atac";
 
-/// ATAC modules under this many peaks hold scattered peaks: they join the
-/// near-empty background, which is never a link candidate.
-const ATAC_MIN_MODULE_SIZE: usize = 10;
+/// ATAC modules are never set aside by size: the background of flat and
+/// near-empty peaks alone (chosen by activity) is flagged, never a link
+/// candidate, and a single peak with strong activity keeps its module.
+const ATAC_MIN_MODULE_SIZE: Option<usize> = Some(0);
 /// RNA modules under this many genes (singletons) hold outlier genes: they
 /// join the flat background and go module-only.
-const RNA_MIN_MODULE_SIZE: usize = 2;
+const RNA_MIN_MODULE_SIZE: Option<usize> = Some(2);
 /// ATAC modules never cross a genomic window of this many bp on one
 /// chromosome, so no module sits in every gene's cis window.
 const ATAC_MODULE_WINDOW: i64 = 10_000_000;
@@ -36,12 +38,18 @@ pub struct TwoTrackConfig {
     pub num_levels: usize,
     pub sort_dim: usize,
     pub proj_dim: usize,
-    /// Modules per modality (RNA and ATAC each get this many).
+    /// RNA gene modules.
     pub feature_modules: usize,
+    /// ATAC peak modules (each peak's row is its module's).
+    pub peak_modules: usize,
     pub phase1_cells_per_pb: usize,
     /// On the ATAC modality, module-only when it has at least this many peaks.
     /// `0` disables. Bge default is 100_000; tests use a small threshold.
     pub module_only_min_rows: usize,
+    /// Weight of the gene-to-cis-peak alignment per unit (`0` off).
+    pub align_weight: f32,
+    /// Share of each cis gene's score taken from its cis peaks (`0` off).
+    pub mix: f32,
     pub seed: u64,
     pub device: crate::common::ComputeDevice,
     pub device_no: usize,
@@ -56,8 +64,11 @@ impl Default for TwoTrackConfig {
             sort_dim: 10,
             proj_dim: 50,
             feature_modules: 1024,
+            peak_modules: 10_000,
             phase1_cells_per_pb: 16,
             module_only_min_rows: 100_000,
+            align_weight: 0.1,
+            mix: 0.5,
             seed: 42,
             device: crate::common::ComputeDevice::Cpu,
             device_no: 0,
@@ -91,14 +102,17 @@ pub struct TwoTrackEmbedding {
     pub pairs: CisPairs,
     pub rna_genes: Vec<Box<str>>,
     pub peak_names: Vec<Box<str>>,
-    /// Phase-1 cis gate weights `w` in [`CisPairs`] order (`0` if a pair was
-    /// dropped from the engine table).
+    /// Phase-1 cis gate shares `w̃` (each gene's sum to 1) in [`CisPairs`]
+    /// order.
     pub gate_w: Vec<f32>,
+    /// Per pair, the data's evidence for the link: the correlation across
+    /// pseudobulks of the peak module's score and the gene's, in
+    /// [`CisPairs`] order.
+    pub gate_corr: Vec<f32>,
     pub gate_theta0: f32,
     pub gate_theta1: f32,
-    pub gate_theta3: f32,
-    pub gate_gamma1: f32,
-    pub gate_gamma2: f32,
+    /// The gene-to-cis-peak gap after training (`NaN` without gates).
+    pub align_gap: f32,
 }
 
 pub fn embed_two_track(
@@ -192,11 +206,15 @@ pub fn embed_two_track(
     }
     let mut z_log = nalgebra::DMatrix::from_vec(z_log.len(), 1, z_log);
     z_log.scale_columns_inplace();
-    let cis_gates = (!gene_feat.is_empty()).then_some(ge::CisGates {
-        gene_feat,
-        peak_feat,
-        abc,
-        z_log_contact: z_log.as_slice().to_vec(),
+    let cis_gates = (!gene_feat.is_empty()).then_some(ge::CisCoupling {
+        pairs: ge::CisGates {
+            gene_feat,
+            peak_feat,
+            abc,
+            z_log_contact: z_log.as_slice().to_vec(),
+        },
+        align_weight: cfg.align_weight,
+        mix: cfg.mix,
     });
 
     let h = cfg.embedding_dim;
@@ -243,6 +261,7 @@ pub fn embed_two_track(
             module_only_min_size: ATAC_MIN_MODULE_SIZE,
             residual_min_size: RNA_MIN_MODULE_SIZE,
             feature_block,
+            module_only_modules: Some(cfg.peak_modules),
         }),
     };
     let out = ge::fit(&mut unified, config)?;
@@ -284,49 +303,47 @@ pub fn embed_two_track(
     let peak_rows = feat.select_rows(peak_row_idx.iter());
     let cell_rows = nalgebra::DMatrix::<f32>::from_tensor(&out.model.e_cell)?;
 
-    let (pairs, gate_w, gate_theta0, gate_theta1, gate_theta3, gate_gamma1, gate_gamma2) =
-        match out.cis_gates.as_ref() {
-            Some(cis) => {
-                anyhow::ensure!(
-                    cis.w.len() == cis.source_idx.len(),
-                    "cis readout has {} weights for {} source indices",
-                    cis.w.len(),
-                    cis.source_idx.len()
-                );
-                // `source_idx` indexes the wired `pair_idx` → original CisPairs.
-                let mut keep = Vec::with_capacity(cis.source_idx.len());
-                for &src in &cis.source_idx {
-                    let k = *pair_idx.get(src as usize).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "cis source_idx {src} out of range ({} wired pairs)",
-                            pair_idx.len()
-                        )
-                    })?;
-                    keep.push(k);
-                }
-                debug_assert!(keep.windows(2).all(|w| w[0] <= w[1]));
-                let pairs = pairs.keep_indices(&keep);
-                anyhow::ensure!(
-                    pairs.n_pairs() == cis.w.len(),
-                    "pruned pairs {} != gate weights {}",
-                    pairs.n_pairs(),
-                    cis.w.len()
-                );
-                (
-                    pairs,
-                    cis.w.clone(),
-                    cis.theta0,
-                    cis.theta1,
-                    cis.theta3,
-                    cis.gamma1,
-                    cis.gamma2,
-                )
+    // The gate scalars by name; the pairs and their per-pair columns below.
+    let (gate_theta0, gate_theta1, align_gap) = out
+        .cis_gates
+        .as_ref()
+        .map_or((0.0, 0.0, f32::NAN), |c| (c.theta0, c.theta1, c.align_gap));
+    let (pairs, gate_w, gate_corr) = match out.cis_gates.as_ref() {
+        Some(cis) => {
+            anyhow::ensure!(
+                cis.w.len() == cis.source_idx.len() && cis.corr.len() == cis.w.len(),
+                "cis readout has {} weights and {} correlations for {} source indices",
+                cis.w.len(),
+                cis.corr.len(),
+                cis.source_idx.len()
+            );
+            // `source_idx` indexes the wired `pair_idx` → original CisPairs.
+            let mut keep = Vec::with_capacity(cis.source_idx.len());
+            for &src in &cis.source_idx {
+                let k = *pair_idx.get(src as usize).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "cis source_idx {src} out of range ({} wired pairs)",
+                        pair_idx.len()
+                    )
+                })?;
+                keep.push(k);
             }
-            None => {
-                let w = pairs.weight.clone();
-                (pairs, w, 0.0, 0.0, 0.0, 0.0, 1.0)
-            }
-        };
+            debug_assert!(keep.windows(2).all(|w| w[0] <= w[1]));
+            let pairs = pairs.keep_indices(&keep);
+            anyhow::ensure!(
+                pairs.n_pairs() == cis.w.len(),
+                "pruned pairs {} != gate weights {}",
+                pairs.n_pairs(),
+                cis.w.len()
+            );
+            (pairs, cis.w.clone(), cis.corr.clone())
+        }
+        None => {
+            let w = pairs.weight.clone();
+            let corr = vec![0.0; w.len()];
+            (pairs, w, corr)
+        }
+    };
     Ok(TwoTrackEmbedding {
         genes: gene_names.clone(),
         rna_rows,
@@ -338,10 +355,9 @@ pub fn embed_two_track(
         rna_genes: gene_names,
         peak_names,
         gate_w,
+        gate_corr,
         gate_theta0,
         gate_theta1,
-        gate_theta3,
-        gate_gamma1,
-        gate_gamma2,
+        align_gap,
     })
 }

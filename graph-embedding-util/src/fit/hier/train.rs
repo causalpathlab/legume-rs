@@ -6,7 +6,8 @@ use super::cis_gates::CisMix;
 use super::params::{GroupIntercepts, HierParams, PresetGenes, PresetMode, PresetOffsets};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::step::{
-    apply, cis_mix, cis_readout, step_loss, Optimizers, StepCtx, StepPlan, StepStats,
+    apply, cis_align_loss, cis_dictionary_blend, cis_mix, cis_pool, cis_readout, step_loss,
+    Optimizers, StepCtx, StepPlan, StepStats,
 };
 use super::units::UnitTable;
 use crate::progress::new_progress_bar;
@@ -50,8 +51,9 @@ pub struct HierConfig {
     /// warm start's and does not move. Every module must hold only one kind.
     /// Empty when there are none.
     pub module_only: Vec<bool>,
-    /// Optional cis gates mixed into RNA gene-level scores (chickpea).
-    pub cis_gates: Option<super::cis_gates::CisGates>,
+    /// Optional cis pairs coupling RNA gene rows with their cis peaks'
+    /// modules, and how strongly (chickpea).
+    pub cis_gates: Option<super::cis_gates::CisCoupling>,
     /// Per module, its group (a modality on a multiome axis): with two or more
     /// groups every unit gets one intercept per non-reference group on its
     /// module scores (see [`super::params::GroupIntercepts`]). Empty for none.
@@ -73,7 +75,8 @@ pub struct HierOutput {
     pub final_loss_per_unit: f64,
     /// The module of every gene (the input labels).
     pub labels: Vec<u32>,
-    /// Trained cis gates (shared θ, γ + pair `w`), when configured.
+    /// Trained cis gates (shared θ, pair shares, evidence and the gap), when
+    /// configured.
     pub cis: Option<super::cis_gates::CisGateReadout>,
     /// `[n_units, K − 1]` per-unit group intercepts, when
     /// [`HierConfig::module_group`] named two or more groups.
@@ -364,13 +367,13 @@ pub fn train(
             mo.summary(&um, &part),
         );
     }
-    if let Some(cis) = &cfg.cis_gates {
-        cis.validate(n_features)?;
+    if let Some(coupling) = &cfg.cis_gates {
+        coupling.validate(n_features)?;
         anyhow::ensure!(
             n_t == 1,
             "cis gates need a one-track (multiome) feature axis"
         );
-        let mut resolved = cis.with_peak_modules(&part.module_of);
+        let mut resolved = coupling.pairs.with_peak_modules(&part.module_of);
         if let Some(mo) = &module_only {
             let mut is_mo = vec![false; n_features];
             for &g in &mo.genes {
@@ -393,17 +396,19 @@ pub fn train(
                 n_all - resolved.n_pairs()
             );
         }
-        params.cis = Some(super::cis_gates::CisGateParams::new(
-            &resolved,
-            &part.module_of,
-            n_features,
-            &cfg.device,
-        )?);
+        params.cis = Some(
+            super::cis_gates::CisGateParams::new(&resolved, &part.module_of, &cfg.device)?
+                .with_mix(coupling.mix, n_features, &cfg.device)?,
+        );
         info!(
-            "Phase 1 (hier) — cis gates on {} pairs (shared θ, γ); RNA gene scores mix pooled ATAC",
-            resolved.n_pairs()
+            "Phase 1 (hier) — cis gates on {} pairs (shared θ); alignment weight {}, \
+             mixture share {}",
+            resolved.n_pairs(),
+            coupling.align_weight,
+            coupling.mix
         );
     }
+    let align_weight = cfg.cis_gates.as_ref().map_or(0.0, |c| c.align_weight);
     let skip: Vec<bool> = module_only
         .as_ref()
         .map_or_else(Vec::new, |mo| mo.skip.clone());
@@ -479,9 +484,14 @@ pub fn train(
                 info!("Phase 1 (hier) — stop requested at epoch {epoch}");
                 break 'epochs;
             }
-            // The cis pool once per step; the slices share it as leaves and
-            // its gradient goes back through the pool once.
-            let cis_graph = cis_mix(&params)?;
+            // The cis pool once per step, read by the mixture and the
+            // alignment. The slices share the mixture as leaves and its
+            // gradient goes back through the pool once.
+            let cis_pool = cis_pool(&params)?;
+            let cis_graph = match cis_pool.as_ref() {
+                Some(pool) => cis_mix(&params, pool)?,
+                None => None,
+            };
             let cis_leaves = cis_graph.as_ref().map(CisMix::detached).transpose()?;
             let loss_of = |slice: &[u32], rng: &mut StdRng| {
                 let plan = draw_plan(slice, &pickers, n_m, n_t, cfg.modules_per_unit, rng);
@@ -494,20 +504,29 @@ pub fn train(
                     cis_leaves.as_ref().map(|l| &l.mix),
                 )
             };
-            let (stats, mut grads) = step_grads(chunk, n_threads, &mut rng, &loss_of)?;
+            let (mut stats, mut grads) = step_grads(chunk, n_threads, &mut rng, &loss_of)?;
             if let (Some(graph), Some(leaves)) = (&cis_graph, &cis_leaves) {
                 if let Some(through) = leaves.backprop(graph, &grads)? {
                     merge_grads(&mut grads, &through)?;
+                }
+            }
+            // The cis alignment spans the step's units: once per step.
+            if let (Some(pool), true) = (cis_pool.as_ref(), align_weight > 0.0) {
+                if let Some(loss) = cis_align_loss(&params, pool, chunk, align_weight)? {
+                    stats.loss_align = f64::from(loss.to_scalar::<f32>()?);
+                    merge_grads(&mut grads, &loss.backward()?)?;
                 }
             }
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;
             acc.loss_gene += stats.loss_gene;
             acc.loss_ridge += stats.loss_ridge;
+            acc.loss_align += stats.loss_align;
             n_units_seen += chunk.len();
         }
         let per_unit = 1.0 / n_units_seen.max(1) as f64;
-        last_per_unit = (acc.loss_module + acc.loss_gene + acc.loss_ridge) * per_unit;
+        last_per_unit =
+            (acc.loss_module + acc.loss_gene + acc.loss_ridge + acc.loss_align) * per_unit;
         bar.inc(1);
         // Every epoch, at info: visible under `-v`, silent otherwise.
         let elapsed = t0.elapsed().as_secs_f64();
@@ -515,25 +534,31 @@ pub fn train(
         let eta = elapsed / (epoch + 1) as f64 * (cfg.epochs - epoch - 1) as f64;
         info!(
             "Phase 1 (hier) — epoch {}/{}: loss/unit {:.4} (module {:.4}, gene {:.4}, \
-             ridge {:.4}), {:.1} ms/step, eta {:.0} s",
+             ridge {:.4}, align {:.4}), {:.1} ms/step, eta {:.0} s",
             epoch + 1,
             cfg.epochs,
             last_per_unit,
             acc.loss_module * per_unit,
             acc.loss_gene * per_unit,
             acc.loss_ridge * per_unit,
+            acc.loss_align * per_unit,
             ms,
             eta
         );
     }
     bar.finish_and_clear();
 
-    // The composed dictionary, one row per FEATURE ROW (see `HierParams::compose`).
-    let (rho, b_feat) = params.compose(
+    // The composed dictionary, one row per FEATURE ROW (see `HierParams::compose`),
+    // under a cis mixture with each cis gene's row as the gene level scored it,
+    // so phase 2 projects against the fitted scores.
+    let (mut rho, mut b_feat) = params.compose(
         &units.tracks.track_of_row,
         &units.tracks.gene_of_row,
         &part.module_of,
     )?;
+    if let Some(blend) = cis_dictionary_blend(&params)? {
+        blend.apply(&mut rho, &mut b_feat);
+    }
     let e_u_host = to_host(params.e_u.as_tensor())?;
     let e_u = DMatrix::<f32>::from_row_slice(n_u, h, &e_u_host);
     let cis = cis_readout(&params)?;

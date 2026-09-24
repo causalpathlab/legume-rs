@@ -32,6 +32,7 @@ fn programs_separate_on_the_multiome_axis() {
         sort_dim: 3,
         proj_dim: 8,
         feature_modules: 4,
+        peak_modules: 4,
         phase1_cells_per_pb: 4,
         // 24 genes < 30 ≤ 48 peaks → ATAC module-only, RNA keeps residuals.
         module_only_min_rows: 30,

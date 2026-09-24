@@ -6,8 +6,11 @@
 //! - `cell_embedding`, `cell_clusters`;
 //! - `peak_embedding`: each peak's ATAC-module row `μ_{m(p)}`;
 //! - `peaks`: `peak`, `chromosome`, `start`, `end`;
-//! - `links`: `gene`, `peak`, `distance`, `abc`, `gate` (the trained gate
-//!   weight `w`; `0` for a closed pair);
+//! - `links`: `gene`, `peak`, `distance`, `abc`, `gate` (the gene's share of
+//!   each pair under the trained distance prior; each gene's sum to 1, `0`
+//!   for a closed pair), `corr` (the
+//!   data's evidence: correlation across pseudobulks of the peak module's
+//!   score and the gene's) and `score = gate × corr`;
 //! - `links_by_cluster`: `gene_idx`, `peak_idx`, `cluster`, `gate`, `abc`
 //!   (indices into the RNA / peak name axes; shares re-weighted by cluster
 //!   accessibility). Dense string copies of every pair×cluster row OOMs at
@@ -52,9 +55,8 @@ pub struct LinkSummary {
     pub n_clusters: usize,
     pub theta0: f64,
     pub theta1: f64,
-    pub theta3: f64,
-    pub gamma1: f64,
-    pub gamma2: f64,
+    /// The gene-to-cis-peak gap after training.
+    pub align_gap: f64,
 }
 
 pub fn run_links(
@@ -89,8 +91,8 @@ pub fn run_links(
 
     let lambda = stream_cluster_rates(input.atac_file, &emb, &labels, n_clusters, cfg)?;
     info!(
-        "Gates (phase-1 mix): θ0={:.3} θ1={:.3} θ3={:.3}, γ1={:.3} γ2={:.3}",
-        emb.gate_theta0, emb.gate_theta1, emb.gate_theta3, emb.gate_gamma1, emb.gate_gamma2
+        "Gates: θ0={:.3} θ1={:.3}; gene-to-cis-peak gap {:.4}",
+        emb.gate_theta0, emb.gate_theta1, emb.align_gap
     );
 
     let save = |stem: &str, m: &DMatrix<f32>, names: &[Box<str>], axis: &str| {
@@ -123,9 +125,7 @@ pub fn run_links(
         n_clusters,
         theta0: f64::from(emb.gate_theta0),
         theta1: f64::from(emb.gate_theta1),
-        theta3: f64::from(emb.gate_theta3),
-        gamma1: f64::from(emb.gate_gamma1),
-        gamma2: f64::from(emb.gate_gamma2),
+        align_gap: f64::from(emb.align_gap),
     })
 }
 
@@ -228,6 +228,7 @@ fn write_links(
         .iter()
         .map(|&p| emb.peak_names[p as usize].clone())
         .collect();
+    let score: Vec<f32> = w.iter().zip(&emb.gate_corr).map(|(w, c)| w * c).collect();
     write_table(
         &format!("{out}.links.parquet"),
         &[
@@ -236,6 +237,8 @@ fn write_links(
             ("distance".into(), Column::I64(&pairs.dist)),
             ("abc".into(), Column::F32(&pairs.weight)),
             ("gate".into(), Column::F32(w)),
+            ("corr".into(), Column::F32(&emb.gate_corr)),
+            ("score".into(), Column::F32(&score)),
         ],
     )?;
 
