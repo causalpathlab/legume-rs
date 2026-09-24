@@ -822,31 +822,63 @@ fn only_a_cpu_device_slices_a_step_across_threads() {
 }
 
 /// Cis gates on the planted programs: every gene of one program paired with
-/// the same-index gene of the other. A fit moves the shared gate scalars off
-/// their start (the gates train) and returns a finite weight per pair.
-#[test]
-fn a_fit_with_cis_gates_trains_the_gate_scalars() {
-    let (units, labels) = planted_units();
+/// the same-index gene of the other, at alignment weight `align_weight` and
+/// mixture share `mix`.
+fn planted_gates(align_weight: f32, mix: f32) -> crate::fit::hier::CisCoupling {
     let n_pairs = 20usize;
-    let gates = crate::fit::hier::CisGates {
-        gene_feat: (0..20u32).collect(),
-        peak_feat: (0..20u32).map(|g| (g + 10) % 20).collect(),
-        abc: vec![1.0; n_pairs],
-        z_log_contact: (0..n_pairs).map(|k| k as f32 / 10.0 - 1.0).collect(),
-    };
-    let out = run(
+    crate::fit::hier::CisCoupling {
+        pairs: crate::fit::hier::CisGates {
+            gene_feat: (0..20u32).collect(),
+            peak_feat: (0..20u32).map(|g| (g + 10) % 20).collect(),
+            abc: vec![1.0; n_pairs],
+            z_log_contact: (0..n_pairs).map(|k| k as f32 / 10.0 - 1.0).collect(),
+        },
+        align_weight,
+        mix,
+    }
+}
+
+fn fit_with_gates(align_weight: f32, epochs: usize) -> HierOutput {
+    fit_with_mixed_gates(align_weight, 0.0, epochs)
+}
+
+fn fit_with_mixed_gates(align_weight: f32, mix: f32, epochs: usize) -> HierOutput {
+    let (units, labels) = planted_units();
+    run(
         &units,
         &labels,
         4,
         &HierConfig {
-            epochs: 30,
-            cis_gates: Some(gates),
+            epochs,
+            cis_gates: Some(planted_gates(align_weight, mix)),
             ..cfg()
         },
         None,
         &[],
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// The mixture and the alignment together: the fit trains the gates and
+/// writes a finite dictionary that differs from the unmixed one.
+#[test]
+fn a_fit_with_a_mixture_and_alignment_trains() {
+    let mixed = fit_with_mixed_gates(1.0, 0.5, 30);
+    let plain = fit_with_mixed_gates(1.0, 0.0, 30);
+    let cis = mixed.cis.as_ref().expect("a cis readout");
+    assert!(mixed.rho.iter().all(|v| v.is_finite()));
+    assert!(mixed.final_loss_per_unit.is_finite());
+    assert!((cis.theta0 - 1.0).abs() + (cis.theta1 - 0.5).abs() > 1e-3);
+    let diff = (&mixed.rho - &plain.rho).abs().max();
+    assert!(diff > 1e-4, "the mixture left the dictionary unchanged");
+}
+
+/// A fit moves the shared gate scalars off their start (the gates train
+/// through the alignment) and returns a finite share and evidence per pair.
+#[test]
+fn a_fit_with_cis_gates_trains_the_gate_scalars() {
+    let n_pairs = 20usize;
+    let out = fit_with_gates(1.0, 30);
     let cis = out.cis.expect("a cis readout");
     assert_eq!(cis.w.len(), n_pairs);
     assert!(
@@ -854,8 +886,52 @@ fn a_fit_with_cis_gates_trains_the_gate_scalars() {
         "{:?}",
         cis.w
     );
-    let moved = (cis.theta0 - 1.0).abs() + (cis.theta3 - 0.5).abs() + (cis.gamma1 - 0.01).abs();
-    assert!(moved > 1e-2, "the gates never moved: {cis:?}");
+    let moved = (cis.theta0 - 1.0).abs() + (cis.theta1 - 0.5).abs();
+    assert!(moved > 1e-3, "the gates never moved: {cis:?}");
+    assert!(cis.align_gap.is_finite(), "gap {}", cis.align_gap);
+    assert_eq!(cis.corr.len(), n_pairs);
+    assert!(
+        cis.corr
+            .iter()
+            .all(|c| c.is_finite() && c.abs() <= 1.0 + 1e-5),
+        "{:?}",
+        cis.corr
+    );
+}
+
+/// The alignment does its job: the planted pairs join each gene to a gene of
+/// the OTHER program, so without alignment its profile sits far from its
+/// pooled row; a strong weight closes most of that gap.
+#[test]
+fn the_alignment_weight_closes_the_gene_to_atac_gap() {
+    let free = fit_with_gates(0.0, 60).cis.unwrap().align_gap;
+    let aligned = fit_with_gates(10.0, 60).cis.unwrap().align_gap;
+    assert!(
+        aligned < 0.5 * free,
+        "gap without alignment {free}, with {aligned}"
+    );
+}
+
+/// Alignment off, the gene likelihood is the fit without gates: the gates
+/// only read the tables.
+#[test]
+fn at_zero_weight_the_gates_leave_the_fit_alone() {
+    let (units, labels) = planted_units();
+    let plain = run(
+        &units,
+        &labels,
+        4,
+        &HierConfig {
+            epochs: 20,
+            ..cfg()
+        },
+        None,
+        &[],
+    )
+    .unwrap();
+    let gated = fit_with_gates(0.0, 20);
+    let diff = (&plain.rho - &gated.rho).abs().max();
+    assert!(diff < 1e-5, "the dictionary moved by {diff}");
 }
 
 /// One unit on one track whose composition puts most of its counts on a

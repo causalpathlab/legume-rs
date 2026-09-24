@@ -55,7 +55,7 @@
 //! passes (`HierConfig::offset_l2 / steps_per_epoch`, see
 //! [`super::train::per_step_offset_l2`]).
 
-use super::cis_gates::{CisGateParams, CisMix};
+use super::cis_gates::{CisBlend, CisGateParams, CisMix, CisPool};
 use super::params::HierParams;
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::units::UnitTable;
@@ -96,6 +96,8 @@ pub struct StepStats {
     /// The offset ridge and the LoRA ridge AT THIS STEP's weight; exactly `0`
     /// on a one-track axis without a residual.
     pub loss_ridge: f64,
+    /// The weighted cis alignment gap; `0` without gates.
+    pub loss_align: f64,
 }
 
 /// What every step reads and never writes: the unit table, the partition and
@@ -317,7 +319,7 @@ fn score_gene_batches(
         if let Some(l) = params.lora.as_ref() {
             r = (r + l.gene.residual_rows(&g_ids)?)?;
         }
-        // The cis mix is a change of gene row and bias (see `cis_gates`).
+        // The cis mixture is a change of gene row and bias (see `cis_gates`).
         if let Some(mix) = cis {
             (r, bias) = mix.gene_rows(&g_ids, &r, &bias)?;
         }
@@ -337,45 +339,105 @@ fn score_gene_batches(
     Ok(total)
 }
 
-/// The module table the step scores (`μ`, plus the LoRA module residual) and
-/// the cis genes' residual rows as the gene level composes them (`r`, plus
-/// the LoRA gene residual): the pool's `ρ_g = μ_{m(g)} + r_g` is the gene
-/// level's own row.
-fn cis_tables(params: &HierParams, cis: &CisGateParams) -> CResult<(Tensor, Tensor)> {
-    let ids = cis.compact_feat();
-    let mut mu = params.mu.as_tensor().clone();
-    let mut r_c = gather_rows(params.r.as_tensor(), ids)?;
-    if let Some(l) = params.lora.as_ref() {
-        mu = (mu + l.module.residual()?)?;
-        r_c = (r_c + l.gene.residual_rows(ids)?)?;
+/// The module table the step scores: `μ`, plus the LoRA module residual.
+fn cis_module_table(params: &HierParams) -> CResult<Tensor> {
+    match params.lora.as_ref() {
+        Some(l) => params.mu.as_tensor() + l.module.residual()?,
+        None => Ok(params.mu.as_tensor().clone()),
     }
-    Ok((mu, r_c))
 }
 
-/// The step's cis mix, in the graph of the current tables; `None` without
-/// gates. Built once per step (see [`step_loss`]).
-pub fn cis_mix(params: &HierParams) -> CResult<Option<CisMix>> {
+/// The cis genes' residual rows as the gene level composes them: `r` plus the
+/// LoRA gene residual.
+fn cis_residual_rows(params: &HierParams, cis: &CisGateParams) -> CResult<Tensor> {
+    let ids = cis.compact_feat();
+    let r_c = gather_rows(params.r.as_tensor(), ids)?;
+    match params.lora.as_ref() {
+        Some(l) => r_c + l.gene.residual_rows(ids)?,
+        None => Ok(r_c),
+    }
+}
+
+/// The cis pool over the current tables, in their graph; `None` without
+/// gates. Built once per step: the mixture ([`cis_mix`]) and the alignment
+/// ([`cis_align_loss`]) both read it.
+pub fn cis_pool(params: &HierParams) -> CResult<Option<CisPool>> {
     let Some(cis) = params.cis.as_ref() else {
         return Ok(None);
     };
-    let (mu, r_c) = cis_tables(params, cis)?;
-    cis.mix(&mu, params.b_m.as_tensor(), &r_c).map(Some)
+    cis.pool(&cis_module_table(params)?, params.b_m.as_tensor())
+        .map(Some)
 }
 
-/// Trained θ, γ and pair weights; `None` without gates.
+/// The step's cis mixture over its pool; `None` without a mixture.
+pub fn cis_mix(params: &HierParams, pool: &CisPool) -> CResult<Option<CisMix>> {
+    match params.cis.as_ref() {
+        Some(cis) => cis.mix(pool),
+        None => Ok(None),
+    }
+}
+
+/// The step's alignment loss over its pool: `weight · n · gap` over the
+/// step's `n` units `unit_ids`, so it weighs per unit like the likelihood,
+/// which sums over the step's units. `None` without gates.
+pub fn cis_align_loss(
+    params: &HierParams,
+    pool: &CisPool,
+    unit_ids: &[u32],
+    weight: f32,
+) -> CResult<Option<Tensor>> {
+    let Some(cis) = params.cis.as_ref() else {
+        return Ok(None);
+    };
+    let e = gather_rows(params.e_u.as_tensor(), &to_1d(unit_ids, &params.dev)?)?;
+    let gap = cis.align_gap(
+        pool,
+        &cis_module_table(params)?,
+        &cis_residual_rows(params, cis)?,
+        &e,
+    )?;
+    gap.affine(f64::from(weight) * unit_ids.len() as f64, 0.0)
+        .map(Some)
+}
+
+/// Under a cis mixture, what it adds to the cis genes' dictionary rows so
+/// phase 2 projects against the scores phase 1 fitted; `None` otherwise.
+pub fn cis_dictionary_blend(params: &HierParams) -> CResult<Option<CisBlend>> {
+    let Some(cis) = params.cis.as_ref() else {
+        return Ok(None);
+    };
+    let pool = cis.pool(&cis_module_table(params)?, params.b_m.as_tensor())?;
+    cis.dictionary_blend(
+        &pool,
+        &cis_residual_rows(params, cis)?,
+        &gather_rows(params.b_g.as_tensor(), cis.compact_feat())?,
+    )
+}
+
+/// Trained θ, pair shares, the gap and link evidence over every unit; `None`
+/// without gates.
 pub fn cis_readout(params: &HierParams) -> CResult<Option<super::cis_gates::CisGateReadout>> {
     let Some(cis) = params.cis.as_ref() else {
         return Ok(None);
     };
-    let (mu, r_c) = cis_tables(params, cis)?;
-    cis.readout(&mu, params.b_m.as_tensor(), &r_c).map(Some)
+    let mu = cis_module_table(params)?;
+    let pool = cis.pool(&mu, params.b_m.as_tensor())?;
+    cis.readout(
+        &pool,
+        &mu,
+        &cis_residual_rows(params, cis)?,
+        params.e_u.as_tensor(),
+    )
+    .map(Some)
 }
 
 /// The step's loss as one tensor to differentiate, plus its parts as numbers
-/// for the epoch log. Pure in the parameters: nothing is updated here.
+/// for the epoch log. Pure in the parameters: nothing is updated here. The
+/// cis alignment is not part of it: it spans the whole step's units, so the
+/// caller adds it once per step (see [`cis_align_loss`]).
 ///
-/// `cis` is the step's cis mix (see [`cis_mix`]), built by the caller once
-/// per step so the slices of a threaded step share it; `None` without gates.
+/// `cis` is the step's cis mixture (see [`cis_mix`]), built by the caller
+/// once per step so the slices of a threaded step share it; `None` without.
 pub fn step_loss(
     params: &HierParams,
     ctx: &StepCtx<'_>,
@@ -447,6 +509,7 @@ pub fn step_loss(
         loss_module: f64::from(vals[0]),
         loss_gene: f64::from(vals[1]),
         loss_ridge: f64::from(vals[2]),
+        loss_align: 0.0,
     };
     let total = parts
         .into_iter()
@@ -464,8 +527,8 @@ pub struct Optimizers {
     pub offsets: Vec<(RowAdagrad, RowAdagrad, PinnedLoraOpt)>,
     /// Under LoRA: the module residual's pair, then the gene residual's.
     pub lora: Option<[PinnedLoraOpt; 2]>,
-    /// The cis gates' shared scalars (θ, γ): Adam, so their step does not
-    /// scale with a loss summed over every unit and pair of the step.
+    /// The cis gates' shared scalars (θ): Adam, so their step does not scale
+    /// with a loss summed over every unit and pair of the step.
     pub cis: Option<AdamW>,
     /// The per-unit group intercepts, one row per unit like `e_u`.
     pub group: Option<RowAdagrad>,

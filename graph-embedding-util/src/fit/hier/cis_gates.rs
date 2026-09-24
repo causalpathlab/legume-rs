@@ -1,42 +1,60 @@
-//! Optional cis peak→gene gates inside phase-1 gene scores.
+//! Optional cis peak→gene coupling that aligns gene rows with their cis peaks.
 //!
 //! ```text
-//! w_gp = abc · max(0, θ₀ + θ₁ z_log_contact + θ₃ ⟨μ_{m(p)}, ρ_g⟩)
+//! w_gp  = abc · max(0, θ₀ + θ₁ z_log_contact)       w̃_gp = w_gp / Σ_q w_gq
 //! λ_u,m = ⟨e_u, μ_m⟩ + b_m
-//! a_ug  = Σ_p w_gp · λ_u,m(p)
-//! η_ug  = γ₂ · ρ_ug + γ₁ · a_ug      (γ = softplus; θ, γ shared by every gene)
+//! ã_ug  = Σ_p w̃_gp · λ_u,m(p)                      the gene's ATAC-guided activity
+//! η_ug  = (1 − α) ρ_ug + α ã_ug                     a cis gene's likelihood score
+//! gap   = mean_g  var_u(ρ_ug − ã_ug)                ρ_ug = ⟨e_u, μ_{m(g)} + r_g⟩ + b
 //! ```
-//! Gene-level log-softmax then uses `η` instead of `ρ_ug = ⟨e,r⟩+b`.
+//! Two couplings, set on [`CisCoupling`]. The **mixture** takes a global share
+//! `α` of each cis gene's likelihood score from its cis peaks; genes without
+//! pairs keep `ρ_ug`, and phase 2 sees the mixed rows
+//! ([`CisGateParams::dictionary_blend`]). The **alignment** adds
+//! `align_weight · n_units · gap` to phase 1's loss over the step's units: it
+//! pulls each cis gene's own profile across the units toward the predicted
+//! accessibility of its cis peaks, and those peaks' module rows toward the
+//! gene, so the two modalities share one feature space. `θ` (shared by every
+//! gene) trains through both: the gate's shape is the distance profile under
+//! which a gene's cis peaks track the gene.
+//!
+//! The gate is a distance prior: it reads contact only. `w̃` is each gene's
+//! share of its pairs, so only the gate's shape `θ₁/θ₀` matters; a gene whose
+//! gates all close pools nothing.
+//!
+//! The data's evidence for a link is read out after training
+//! ([`CisGateParams::readout`]): the correlation across units of the peak
+//! module's score and the gene's.
 //!
 //! # How it is computed
 //!
-//! `λ` is linear in `e_u`, so the pooled term is a gene row and a gene bias:
+//! Both scores are linear in `e_u`, so the pooled term is a gene row plus a
+//! gene bias, and the gap is a quadratic form in the units' covariance `Σ`
+//! (centring across units drops every bias):
 //!
 //! ```text
-//! a_ug = ⟨e_u, ν_g⟩ + c_g        ν_g = Σ_p w_gp μ_{m(p)}      c_g = Σ_p w_gp b_{m(p)}
-//! η_ug = ⟨e_u, γ₂ r_g + γ₁ ν_g⟩ + γ₂ b_g + γ₁ c_g
+//! ã_ug = ⟨e_u, ν̃_g⟩ + c̃_g      ν̃_g = Σ_p w̃_gp μ_{m(p)}      c̃_g = Σ_p w̃_gp b_{m(p)}
+//! var_u(ρ_ug − ã_ug) = d_gᵀ Σ d_g                   d_g = μ_{m(g)} + r_g − ν̃_g
 //! ```
 //!
-//! [`CisGateParams::pool`] builds `ν`, `c` once per step over the cis genes
-//! and the modules their peaks fall in (`W` and `⟨ρ, μ⟩`, both
-//! `[n_cis_genes × n_peak_modules]`), and [`CisMix::gene_rows`] folds them
-//! into the gathered gene rows before the gene-level matmul. No tensor in a
-//! gene batch carries a module axis.
-//!
-//! A step split over threads builds the pool once: [`CisMix::detached`] hands
-//! the slices shared leaves, and [`CisMixLeaves::backprop`] carries their
-//! summed gradient back through the pool.
+//! [`CisGateParams::pool`] scatters each pair's `w̃ μ_{m(p)}` and `w̃ b_{m(p)}`
+//! onto its gene (`[n_pairs × H]` work, no gene × module block), once per
+//! step; the mixture and the gap both read that pool. A step split over
+//! threads hands the slices the mixture as shared leaves
+//! ([`CisMix::detached`]) and carries their summed gradient back through the
+//! pool once ([`CisMixLeaves::backprop`]). `Σ` is taken on the units
+//! detached: the gap moves features and gates, never the units, so flattening
+//! the units is not a way to close it.
 
 use legume_numeric::candle::candle_core::backprop::GradStore;
 use legume_numeric::candle::candle_core::{DType, Device, Result as CResult, Tensor, Var};
 use legume_numeric::candle::fast_index::{gather_rows, index_add_rows};
-use legume_numeric::candle::loss::log_sigmoid;
+use nalgebra::DMatrix;
 use rustc_hash::FxHashMap;
 
-/// γ₁ at the start: the links carry a small share and still take a gradient.
-const INIT_GAMMA1: f64 = 0.01;
-/// γ₂ at the start: the residual score as it is.
-const INIT_GAMMA2: f64 = 1.0;
+/// Floor on a gene's gate total before dividing its shares: a gene whose
+/// gates all close pools nothing instead of `0/0`.
+const GATE_TOTAL_FLOOR: f64 = 1e-12;
 
 /// Parallel cis pairs on the unified feature axis (one-track multiome).
 #[derive(Clone, Debug, Default)]
@@ -92,6 +110,34 @@ impl CisGates {
     }
 }
 
+/// The cis pairs and how strongly they couple the two modalities.
+#[derive(Clone, Debug, Default)]
+pub struct CisCoupling {
+    pub pairs: CisGates,
+    /// Weight of the alignment gap per unit, next to the likelihood.
+    pub align_weight: f32,
+    /// Share `α ∈ [0, 1)` of each cis gene's likelihood score taken from its
+    /// cis peaks: `η = (1 − α) ρ + α ã`. `0` leaves the likelihood exact.
+    pub mix: f32,
+}
+
+impl CisCoupling {
+    pub fn validate(&self, n_features: usize) -> anyhow::Result<()> {
+        self.pairs.validate(n_features)?;
+        anyhow::ensure!(
+            self.align_weight.is_finite() && self.align_weight >= 0.0,
+            "cis alignment weight must be finite and non-negative, got {}",
+            self.align_weight
+        );
+        anyhow::ensure!(
+            (0.0..1.0).contains(&self.mix),
+            "cis mixture share must be in [0, 1), got {}",
+            self.mix
+        );
+        Ok(())
+    }
+}
+
 /// Pairs with peak modules resolved.
 #[derive(Clone, Debug)]
 pub struct CisGatesResolved {
@@ -121,7 +167,7 @@ impl CisGatesResolved {
     }
 
     /// Drop the pairs of genes flagged in `drop_gene` (by feature id): a
-    /// module-only gene has no gene level for its links to feed.
+    /// module-only gene has no row of its own to align.
     #[must_use]
     pub fn without_genes(&self, drop_gene: &[bool]) -> Self {
         let keep: Vec<usize> = (0..self.n_pairs())
@@ -136,7 +182,7 @@ impl CisGatesResolved {
     }
 
     /// Drop the pairs whose peak sits in a module flagged in `background` (by
-    /// module id): near-empty or scattered peaks carry no link signal.
+    /// module id): flat or near-empty peaks carry no link signal.
     #[must_use]
     pub fn without_peak_modules(&self, background: &[bool]) -> Self {
         let keep: Vec<usize> = (0..self.n_pairs())
@@ -151,45 +197,37 @@ impl CisGatesResolved {
     }
 }
 
-/// Trainable scalars + device copies of the pair tables, indexed on the
-/// COMPACT axes: the genes that have pairs, and the modules their peaks fall in.
+/// Trainable scalars + device copies of the pair tables. Genes are indexed
+/// on the COMPACT axis of the genes that have pairs.
 pub struct CisGateParams {
     pub theta0: Var,
     pub theta1: Var,
-    pub theta3: Var,
-    /// softplus⁻¹(γ₁); starts at γ₁ = [`INIT_GAMMA1`].
-    pub raw_gamma1: Var,
-    /// softplus⁻¹(γ₂); starts at γ₂ = [`INIT_GAMMA2`].
-    pub raw_gamma2: Var,
     /// Feature id of every compact gene, `[n_compact]`.
     compact_feat: Tensor,
-    /// Module of every compact gene, `[n_compact]`.
+    /// Module of every compact gene, `[n_compact]`: `ρ_g = μ_{m(g)} + r_g`.
     compact_gene_module: Tensor,
-    /// Module id of every compact peak module, `[n_peak_modules]`.
-    peak_modules: Tensor,
-    /// `compact_gene · n_peak_modules + compact_module` per pair, `u32`
-    /// (never through f32: the product passes 2^24).
-    flat_idx: Tensor,
+    /// Compact gene of every pair, `[n_pairs]`.
+    pair_gene: Tensor,
+    /// Module of every pair's peak, `[n_pairs]`.
+    pair_module: Tensor,
     abc: Tensor,
     z_log_contact: Tensor,
-    /// Feature → compact gene id; a gene without pairs maps to the zero row
-    /// `n_compact`.
-    feat_to_compact: Tensor,
     pub n_compact: usize,
-    pub n_peak_modules: usize,
     /// Index into the caller's original [`CisGates`] order (after dropping
-    /// module-only genes' pairs).
+    /// pairs of module-only genes and background peaks).
     pub source_idx: Vec<u32>,
+    /// The mixture, when on (see [`Self::with_mix`]).
+    mixture: Option<Mixture>,
 }
 
-/// `softplus(x) = −log σ(−x)`.
-fn softplus(t: &Tensor) -> CResult<Tensor> {
-    log_sigmoid(&t.neg()?)?.neg()
-}
-
-/// `softplus⁻¹(y) = ln(eʸ − 1)`.
-fn inv_softplus(y: f64) -> f64 {
-    y.exp_m1().ln()
+/// The mixture's tables: its share and the gene-axis lookup.
+struct Mixture {
+    alpha: f32,
+    /// Feature → compact gene id; a gene without pairs maps to `n_compact`.
+    feat_to_compact: Tensor,
+    /// Each gene's own share: `1 − α` per compact gene, `1` on the trailing
+    /// row for genes without pairs, `[n_compact + 1]`.
+    self_share: Tensor,
 }
 
 /// Per item its compact id (first-seen order), and the distinct items.
@@ -208,144 +246,213 @@ fn compact_ids(ids: &[u32]) -> (Vec<u32>, Vec<u32>) {
     (per_item, order)
 }
 
+/// The units' covariance `[H, H]`, detached: `(1/n) Σ_u (e_u − ē)(e_u − ē)ᵀ`.
+fn unit_covariance(e: &Tensor) -> CResult<Tensor> {
+    let e = e.detach();
+    let n = e.dim(0)?.max(1) as f64;
+    let e_c = e.broadcast_sub(&e.mean_keepdim(0)?)?;
+    e_c.t()?.matmul(&e_c)? / n
+}
+
 impl CisGateParams {
-    /// `module_of` is the partition of the whole feature axis (`n_features`
-    /// long): it gives each cis gene's own module for `ρ_g = μ_{m(g)} + r_g`.
-    pub fn new(
-        spec: &CisGatesResolved,
-        module_of: &[u32],
-        n_features: usize,
-        dev: &Device,
-    ) -> CResult<Self> {
+    /// `module_of` is the partition of the whole feature axis: it gives each
+    /// cis gene's own module for `ρ_g = μ_{m(g)} + r_g`.
+    pub fn new(spec: &CisGatesResolved, module_of: &[u32], dev: &Device) -> CResult<Self> {
         let n = spec.n_pairs();
         let scalar = |x: f64| -> CResult<Var> { Var::from_tensor(&Tensor::new(x as f32, dev)?) };
         let (gene_c, genes) = compact_ids(&spec.gene_feat);
-        let (module_c, modules) = compact_ids(&spec.peak_module);
-        let (n_compact, n_peak_modules) = (genes.len(), modules.len());
-        let mut feat_to_compact = vec![n_compact as u32; n_features];
-        for (c, &g) in genes.iter().enumerate() {
-            feat_to_compact[g as usize] = c as u32;
-        }
-        let flat: Vec<u32> = gene_c
-            .iter()
-            .zip(&module_c)
-            .map(|(&g, &m)| g * n_peak_modules as u32 + m)
-            .collect();
+        let n_compact = genes.len();
         let gene_module: Vec<u32> = genes.iter().map(|&g| module_of[g as usize]).collect();
 
         Ok(Self {
             theta0: scalar(1.0)?,
             theta1: scalar(0.5)?,
-            theta3: scalar(0.5)?,
-            raw_gamma1: scalar(inv_softplus(INIT_GAMMA1))?,
-            raw_gamma2: scalar(inv_softplus(INIT_GAMMA2))?,
             compact_feat: Tensor::from_vec(genes, n_compact, dev)?,
             compact_gene_module: Tensor::from_vec(gene_module, n_compact, dev)?,
-            peak_modules: Tensor::from_vec(modules, n_peak_modules, dev)?,
-            flat_idx: Tensor::from_vec(flat, n, dev)?,
+            pair_gene: Tensor::from_vec(gene_c, n, dev)?,
+            pair_module: Tensor::from_vec(spec.peak_module.clone(), n, dev)?,
             abc: Tensor::from_vec(spec.abc.clone(), n, dev)?,
             z_log_contact: Tensor::from_vec(spec.z_log_contact.clone(), n, dev)?,
-            feat_to_compact: Tensor::from_vec(feat_to_compact, n_features, dev)?,
             n_compact,
-            n_peak_modules,
             source_idx: spec.source_idx.clone(),
+            mixture: None,
         })
     }
 
-    pub fn vars(&self) -> Vec<Var> {
-        vec![
-            self.theta0.clone(),
-            self.theta1.clone(),
-            self.theta3.clone(),
-            self.raw_gamma1.clone(),
-            self.raw_gamma2.clone(),
-        ]
+    /// Mix a share `alpha` of the cis peaks' pooled activity into each cis
+    /// gene's likelihood score (`alpha = 0`: no mixture). `n_features` is the
+    /// length of the feature axis the gene level indexes.
+    pub fn with_mix(mut self, alpha: f32, n_features: usize, dev: &Device) -> CResult<Self> {
+        if alpha == 0.0 {
+            self.mixture = None;
+            return Ok(self);
+        }
+        let n_c = self.n_compact;
+        let mut feat_to_compact = vec![n_c as u32; n_features];
+        for (c, g) in self.compact_feat.to_vec1::<u32>()?.into_iter().enumerate() {
+            feat_to_compact[g as usize] = c as u32;
+        }
+        let mut self_share = vec![1.0 - alpha; n_c];
+        self_share.push(1.0);
+        self.mixture = Some(Mixture {
+            alpha,
+            feat_to_compact: Tensor::from_vec(feat_to_compact, n_features, dev)?,
+            self_share: Tensor::from_vec(self_share, n_c + 1, dev)?,
+        });
+        Ok(self)
     }
 
-    /// Feature ids of the cis genes, `[n_compact]`: the rows of `r` that
-    /// [`Self::pool`] takes as `r_c`.
+    pub fn vars(&self) -> Vec<Var> {
+        vec![self.theta0.clone(), self.theta1.clone()]
+    }
+
+    /// Feature ids of the cis genes, `[n_compact]`: the rows of `r` and `b_g`
+    /// the callers pass as `r_c` and `b_c`.
     #[must_use]
     pub fn compact_feat(&self) -> &Tensor {
         &self.compact_feat
     }
 
-    pub fn gammas(&self) -> CResult<(Tensor, Tensor)> {
-        Ok((
-            softplus(self.raw_gamma1.as_tensor())?,
-            softplus(self.raw_gamma2.as_tensor())?,
-        ))
-    }
-
-    /// Pair weights `w` `[n_pairs]` and the pooled gene rows `ν`
-    /// `[n_compact + 1, H]` and biases `c` `[n_compact + 1]` (last row zero,
-    /// for genes without pairs). `mu` `[M, H]`, `b_m` `[M]` are the module
-    /// tables; `r_c` `[n_compact, H]` the cis genes' residual rows.
-    pub fn pool(&self, mu: &Tensor, b_m: &Tensor, r_c: &Tensor) -> CResult<CisPool> {
-        let (n_c, n_pm) = (self.n_compact, self.n_peak_modules);
+    /// Each gene's pair shares `w̃` `[n_pairs]`, the pooled rows `ν̃`
+    /// `[n_compact, H]` and biases `c̃` `[n_compact]`, from the module table
+    /// `mu` `[M, H]` and biases `b_m` `[M]`: every pair's `w̃ μ_{m(p)}` and
+    /// `w̃ b_{m(p)}` scattered onto its gene.
+    pub fn pool(&self, mu: &Tensor, b_m: &Tensor) -> CResult<CisPool> {
+        let n_c = self.n_compact;
         let h = mu.dim(1)?;
         let dev = mu.device();
-        let rho_c = (gather_rows(mu, &self.compact_gene_module)? + r_c)?;
-        let mu_p = gather_rows(mu, &self.peak_modules)?;
-        let b_p = gather_rows(b_m, &self.peak_modules)?;
-        // ⟨μ_{m(p)}, ρ_g⟩ for every pair, read off the dense `[n_c, n_pm]` block.
-        let agree = gather_rows(
-            &rho_c.matmul(&mu_p.t()?)?.reshape((n_c * n_pm, 1))?,
-            &self.flat_idx,
-        )?
-        .squeeze(1)?;
         let s = self
             .theta0
             .as_tensor()
-            .broadcast_add(&self.z_log_contact.broadcast_mul(self.theta1.as_tensor())?)?
-            .broadcast_add(&agree.broadcast_mul(self.theta3.as_tensor())?)?;
-        let w = (&self.abc * s.relu()?)?;
-        let w_gm = index_add_rows(
-            &Tensor::zeros((n_c * n_pm, 1), DType::F32, dev)?,
-            &self.flat_idx,
-            &w.unsqueeze(1)?,
+            .broadcast_add(&self.z_log_contact.broadcast_mul(self.theta1.as_tensor())?)?;
+        let w_raw = (&self.abc * s.relu()?)?;
+        let total = index_add_rows(
+            &Tensor::zeros((n_c, 1), DType::F32, dev)?,
+            &self.pair_gene,
+            &w_raw.unsqueeze(1)?,
+        )?;
+        let w = (&w_raw
+            / gather_rows(&total, &self.pair_gene)?
+                .squeeze(1)?
+                .maximum(GATE_TOTAL_FLOOR)?)?;
+        let w_col = w.unsqueeze(1)?;
+        let nu = index_add_rows(
+            &Tensor::zeros((n_c, h), DType::F32, dev)?,
+            &self.pair_gene,
+            &gather_rows(mu, &self.pair_module)?.broadcast_mul(&w_col)?,
+        )?;
+        let c = index_add_rows(
+            &Tensor::zeros((n_c, 1), DType::F32, dev)?,
+            &self.pair_gene,
+            &(gather_rows(b_m, &self.pair_module)?.unsqueeze(1)? * &w_col)?,
         )?
-        .reshape((n_c, n_pm))?;
-        let nu = Tensor::cat(
-            &[
-                &w_gm.matmul(&mu_p)?,
-                &Tensor::zeros((1, h), DType::F32, dev)?,
-            ],
-            0,
-        )?;
-        let c = Tensor::cat(
-            &[
-                &w_gm.matmul(&b_p.unsqueeze(1)?)?.squeeze(1)?,
-                &Tensor::zeros(1, DType::F32, dev)?,
-            ],
-            0,
-        )?;
+        .squeeze(1)?;
         Ok(CisPool { w, nu, c })
     }
 
-    /// [`Self::pool`] and γ: what the gene level mixes in.
-    pub fn mix(&self, mu: &Tensor, b_m: &Tensor, r_c: &Tensor) -> CResult<CisMix> {
-        let pool = self.pool(mu, b_m, r_c)?;
-        let (gamma1, gamma2) = self.gammas()?;
-        Ok(CisMix {
-            feat_to_compact: self.feat_to_compact.clone(),
-            nu: pool.nu,
-            c: pool.c,
-            gamma1,
-            gamma2,
-        })
+    /// What the gene level mixes in over a built `pool`, or `None` without a
+    /// mixture: `ν̃` and `c̃` on the compact gene axis, a zero row appended for
+    /// genes without pairs.
+    pub fn mix(&self, pool: &CisPool) -> CResult<Option<CisMix>> {
+        let Some(mx) = self.mixture.as_ref() else {
+            return Ok(None);
+        };
+        let dev = pool.nu.device();
+        let h = pool.nu.dim(1)?;
+        Ok(Some(CisMix {
+            feat_to_compact: mx.feat_to_compact.clone(),
+            nu: Tensor::cat(&[&pool.nu, &Tensor::zeros((1, h), DType::F32, dev)?], 0)?,
+            c: Tensor::cat(&[&pool.c, &Tensor::zeros(1, DType::F32, dev)?], 0)?,
+            self_share: mx.self_share.clone(),
+        }))
     }
 
-    /// Host readout after training: shared θ, γ and pair weights `w`.
-    pub fn readout(&self, mu: &Tensor, b_m: &Tensor, r_c: &Tensor) -> CResult<CisGateReadout> {
-        let pool = self.pool(mu, b_m, r_c)?;
-        let (g1, g2) = self.gammas()?;
+    /// Under a mixture, what it adds over a built `pool` to each cis gene's
+    /// composed dictionary row `μ_{m(g)} + r_g` and bias `b_{m(g)} + b_g`, so
+    /// phase 2 projects against the scores phase 1 fitted: `α (ν̃_g − r_g)` and
+    /// `α (c̃_g − b_g)`. `r_c`, `b_c` are the cis genes' residual rows and
+    /// biases. `None` without a mixture.
+    pub fn dictionary_blend(
+        &self,
+        pool: &CisPool,
+        r_c: &Tensor,
+        b_c: &Tensor,
+    ) -> CResult<Option<CisBlend>> {
+        let Some(mx) = self.mixture.as_ref() else {
+            return Ok(None);
+        };
+        let alpha = f64::from(mx.alpha);
+        Ok(Some(CisBlend {
+            feat: self.compact_feat.to_vec1::<u32>()?,
+            row: ((&pool.nu - r_c)? * alpha)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            bias: ((&pool.c - b_c)? * alpha)?.to_vec1::<f32>()?,
+        }))
+    }
+
+    /// The cis genes' own rows `ρ_c = μ_{m(g)} + r_c`, `[n_compact, H]`.
+    fn gene_rows(&self, mu: &Tensor, r_c: &Tensor) -> CResult<Tensor> {
+        gather_rows(mu, &self.compact_gene_module)? + r_c
+    }
+
+    /// The alignment gap over the units `e` `[n_u, H]`: per cis gene
+    /// `var_u(⟨e_u, ρ_g − ν̃_g⟩) = d_gᵀ Σ d_g`, averaged over the genes, with
+    /// `Σ` detached. `pool` is built over the module table `mu`; `r_c` are
+    /// the cis genes' residual rows.
+    pub fn align_gap(
+        &self,
+        pool: &CisPool,
+        mu: &Tensor,
+        r_c: &Tensor,
+        e: &Tensor,
+    ) -> CResult<Tensor> {
+        let d = (self.gene_rows(mu, r_c)? - &pool.nu)?;
+        (d.matmul(&unit_covariance(e)?)? * &d)?.sum(1)?.mean_all()
+    }
+
+    /// Host readout after training over a built `pool`: shared θ, pair shares
+    /// `w̃`, the gap over the units `e_u` `[n_u, H]`, and each pair's evidence
+    /// `corr` — the correlation across the units of the peak module's score
+    /// `⟨e_u, μ_{m(p)}⟩` and the gene's own `⟨e_u, ρ_g⟩`. With `Σ` the units'
+    /// covariance it is `μᵀΣρ / √(μᵀΣμ · ρᵀΣρ)`; `0` for a score that does
+    /// not vary.
+    pub fn readout(
+        &self,
+        pool: &CisPool,
+        mu: &Tensor,
+        r_c: &Tensor,
+        e_u: &Tensor,
+    ) -> CResult<CisGateReadout> {
+        let sigma = unit_covariance(e_u)?;
+        let rho_c = self.gene_rows(mu, r_c)?;
+        let rho_s = rho_c.matmul(&sigma)?;
+        let var_g = (&rho_s * &rho_c)?.sum(1)?;
+        let var_m = (mu.matmul(&sigma)? * mu)?.sum(1)?;
+        let cov = (gather_rows(&rho_s, &self.pair_gene)? * gather_rows(mu, &self.pair_module)?)?
+            .sum(1)?
+            .to_vec1::<f32>()?;
+        let den = (gather_rows(&var_g, &self.pair_gene)?
+            * gather_rows(&var_m, &self.pair_module)?)?
+        .sqrt()?
+        .to_vec1::<f32>()?;
+        let corr = cov
+            .iter()
+            .zip(&den)
+            .map(|(&c, &d)| {
+                if d > 1e-12 {
+                    (c / d).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
         Ok(CisGateReadout {
             theta0: self.theta0.as_tensor().to_scalar::<f32>()?,
             theta1: self.theta1.as_tensor().to_scalar::<f32>()?,
-            theta3: self.theta3.as_tensor().to_scalar::<f32>()?,
-            gamma1: g1.to_scalar::<f32>()?,
-            gamma2: g2.to_scalar::<f32>()?,
             w: pool.w.to_vec1::<f32>()?,
+            corr,
+            align_gap: self.align_gap(pool, mu, r_c, e_u)?.to_scalar::<f32>()?,
             source_idx: self.source_idx.clone(),
         })
     }
@@ -353,23 +460,26 @@ impl CisGateParams {
 
 /// The pool of one step (see [`CisGateParams::pool`]).
 pub struct CisPool {
+    /// Each gene's share of each pair, `[n_pairs]`.
     pub w: Tensor,
+    /// Pooled rows `ν̃`, `[n_compact, H]`.
     pub nu: Tensor,
+    /// Pooled biases `c̃`, `[n_compact]`.
     pub c: Tensor,
 }
 
 /// What the gene level mixes in: pooled rows and biases on the compact gene
-/// axis, and the two shared weights.
+/// axis, and each gene's own share.
 pub struct CisMix {
     feat_to_compact: Tensor,
     pub nu: Tensor,
     pub c: Tensor,
-    pub gamma1: Tensor,
-    pub gamma2: Tensor,
+    self_share: Tensor,
 }
 
 impl CisMix {
-    /// `(γ₂ r + γ₁ ν_g, γ₂ b + γ₁ c_g)` for the genes `g_ids` whose residual
+    /// `(s r + (1 − s) ν̃_g, s b + (1 − s) c̃_g)` — `s = 1 − α` for a cis gene,
+    /// `1` for a gene without pairs — for the genes `g_ids` whose residual
     /// rows `r` `[n, H]` and biases `bias` `[n]` are already gathered.
     pub fn gene_rows(
         &self,
@@ -380,8 +490,10 @@ impl CisMix {
         let compact = self.feat_to_compact.index_select(g_ids, 0)?;
         let nu = gather_rows(&self.nu, &compact)?;
         let c = gather_rows(&self.c, &compact)?;
-        let r = (r.broadcast_mul(&self.gamma2)? + nu.broadcast_mul(&self.gamma1)?)?;
-        let bias = (bias.broadcast_mul(&self.gamma2)? + c.broadcast_mul(&self.gamma1)?)?;
+        let s = self.self_share.index_select(&compact, 0)?;
+        let other = s.affine(-1.0, 1.0)?;
+        let r = (r.broadcast_mul(&s.unsqueeze(1)?)? + nu.broadcast_mul(&other.unsqueeze(1)?)?)?;
+        let bias = ((bias * &s)? + (c * &other)?)?;
         Ok((r, bias))
     }
 
@@ -389,19 +501,13 @@ impl CisMix {
     /// each run their own backward.
     pub fn detached(&self) -> CResult<CisMixLeaves> {
         let leaf = |t: &Tensor| Var::from_tensor(&t.detach());
-        let vars = [
-            leaf(&self.nu)?,
-            leaf(&self.c)?,
-            leaf(&self.gamma1)?,
-            leaf(&self.gamma2)?,
-        ];
+        let vars = [leaf(&self.nu)?, leaf(&self.c)?];
         Ok(CisMixLeaves {
             mix: CisMix {
                 feat_to_compact: self.feat_to_compact.clone(),
                 nu: vars[0].as_tensor().clone(),
                 c: vars[1].as_tensor().clone(),
-                gamma1: vars[2].as_tensor().clone(),
-                gamma2: vars[3].as_tensor().clone(),
+                self_share: self.self_share.clone(),
             },
             vars,
         })
@@ -411,7 +517,7 @@ impl CisMix {
 /// A [`CisMix`] on leaves, and the leaves themselves.
 pub struct CisMixLeaves {
     pub mix: CisMix,
-    vars: [Var; 4],
+    vars: [Var; 2],
 }
 
 impl CisMixLeaves {
@@ -419,7 +525,7 @@ impl CisMixLeaves {
     /// (the mix the leaves were cut from): `Σ ⟨graph_i, ∂L/∂leaf_i⟩`
     /// differentiated. `None` when no leaf took a gradient this step.
     pub fn backprop(&self, graph: &CisMix, grads: &GradStore) -> CResult<Option<GradStore>> {
-        let outs = [&graph.nu, &graph.c, &graph.gamma1, &graph.gamma2];
+        let outs = [&graph.nu, &graph.c];
         let mut surrogate: Option<Tensor> = None;
         for (v, out) in self.vars.iter().zip(outs) {
             if let Some(g) = grads.get(v) {
@@ -434,16 +540,45 @@ impl CisMixLeaves {
     }
 }
 
-/// Trained cis scalars + pair weights (caller pair order via [`Self::source_idx`]).
+/// What a mixture adds to the cis genes' dictionary rows (see
+/// [`CisGateParams::dictionary_blend`]).
+pub struct CisBlend {
+    /// Feature id of every cis gene.
+    feat: Vec<u32>,
+    /// Per cis gene, added to its row: `[n × H]` row-major.
+    row: Vec<f32>,
+    /// Per cis gene, added to its bias.
+    bias: Vec<f32>,
+}
+
+impl CisBlend {
+    /// Apply to a composed dictionary (one row per feature, `b` alike).
+    pub fn apply(&self, rho: &mut DMatrix<f32>, b: &mut [f32]) {
+        let h = rho.ncols();
+        debug_assert_eq!(self.row.len(), self.feat.len() * h);
+        for (i, &f) in self.feat.iter().enumerate() {
+            let f = f as usize;
+            for k in 0..h {
+                rho[(f, k)] += self.row[i * h + k];
+            }
+            b[f] += self.bias[i];
+        }
+    }
+}
+
+/// Trained cis scalars + pair shares (caller pair order via
+/// [`Self::source_idx`]).
 #[derive(Clone, Debug)]
 pub struct CisGateReadout {
     pub theta0: f32,
     pub theta1: f32,
-    pub theta3: f32,
-    pub gamma1: f32,
-    pub gamma2: f32,
-    /// `w_gp` aligned with [`Self::source_idx`].
+    /// `w̃_gp`, the gene's share of each pair, aligned with [`Self::source_idx`].
     pub w: Vec<f32>,
+    /// Per pair, the data's evidence (see [`CisGateParams::readout`]),
+    /// aligned with [`Self::source_idx`].
+    pub corr: Vec<f32>,
+    /// The alignment gap over all units at the end of training.
+    pub align_gap: f32,
     /// Indices into the original [`CisGates`] pair arrays passed to the fit.
     pub source_idx: Vec<u32>,
 }

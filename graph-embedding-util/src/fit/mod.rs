@@ -20,7 +20,7 @@ pub use config::{
     validate_offset_rank, FeatureModuleConfig, FitConfig, FitOutput, MultiomeOptions,
     ParentModulesOwned, TrackInfo, TrackSpec,
 };
-pub use hier::{CisGateReadout, CisGates};
+pub use hier::{CisCoupling, CisGateReadout, CisGates};
 pub use module_args::FeatureModuleArgs;
 pub use module_partition::{parent_module_logits, partition_modules};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
@@ -235,10 +235,17 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let (labels, n_modules) = if let Some((modality, flags)) = &module_only_plan {
         let (counts, sizes) = finest_counts()?;
         module_only = modality.iter().map(|&k| flags[k as usize]).collect();
-        // One group per modality, every modality with the same module count.
-        let n_modalities = flags.len();
+        // One group per modality; its budget and minimum size follow its role
+        // (module-only or residual).
         let opts = config.multiome.clone().unwrap_or_default();
-        let min_size: Vec<usize> = flags
+        let n_per: Vec<usize> = flags
+            .iter()
+            .map(|&mo| match (mo, opts.module_only_modules) {
+                (true, Some(n)) => n,
+                _ => n_per_modality,
+            })
+            .collect();
+        let min_size: Vec<Option<usize>> = flags
             .iter()
             .map(|&mo| {
                 if mo {
@@ -252,7 +259,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             &counts,
             &sizes,
             modality,
-            &vec![n_per_modality; n_modalities],
+            &n_per,
             &min_size,
             opts.feature_block.as_deref(),
             config.seed,
@@ -269,9 +276,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         background_modules = part.background;
         let (labels, n) = (part.labels, part.n_modules);
         if opts.modality_intercepts {
-            // `partition_modules_by_group` numbers modality `k`'s modules
-            // `k·n_per_modality ..`.
-            module_group = (0..n).map(|m| (m / n_per_modality) as u32).collect();
+            module_group = module_partition::module_groups(&n_per);
         }
         let n_bg = n_scattered
             + merge_module_only(
@@ -284,7 +289,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                 ),
             );
         info!(
-            "Phase 1 (hier) — modality-pure modules: {n_per_modality} per modality, {n} in \
+            "Phase 1 (hier) — modality-pure modules: {n_per:?} per modality, {n} in \
              total; module-only modalities {:?} ({} features); {n_bg} flat or scattered \
              feature(s) of residual modalities also module-only",
             flags

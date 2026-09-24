@@ -166,23 +166,36 @@ pub struct GroupedPartition {
     pub labels: Vec<u32>,
     /// Total module count, `Σ n_per`.
     pub n_modules: usize,
-    /// Per module, `true` for the background module of a group asked to set
-    /// scattered rows aside (`min_size[k] > 1`): near-empty or scattered rows.
+    /// Per module, `true` for the background module of a group asked for one
+    /// (`min_size[k]` set): flat or near-empty rows, and the scattered rows
+    /// its minimum sets aside.
     pub background: Vec<bool>,
 }
 
+/// The group of every module of [`partition_modules_by_group`] at budgets
+/// `n_per`: group `k` holds the `n_per[k]` ids after the previous groups'.
+#[must_use]
+pub fn module_groups(n_per: &[usize]) -> Vec<u32> {
+    n_per
+        .iter()
+        .enumerate()
+        .flat_map(|(k, &n)| std::iter::repeat_n(k as u32, n))
+        .collect()
+}
+
 /// [`partition_features`] confined to GROUPS of rows: group `k`'s rows are
-/// partitioned on their own into at most `n_per[k]` modules, groups under
-/// `min_size[k]` rows set aside into the background and none crossing a block
-/// of `block_of_row` (`None`: no blocks), numbered after the previous groups'.
-/// Groups are modalities, so one modality can drop its residual while the
-/// others keep theirs.
+/// partitioned on their own into at most `n_per[k]` modules, none crossing a
+/// block of `block_of_row` (`None`: no blocks), numbered after the previous
+/// groups'. `min_size[k] = Some(m)` flags the group's background (flat and
+/// near-empty rows, plus modules under `m` rows set aside as scattered);
+/// `None` flags nothing. Groups are modalities, so one modality can drop its
+/// residual while the others keep theirs.
 pub fn partition_modules_by_group(
     counts: &DMatrix<f32>,
     sizes: &[f32],
     group_of_row: &[u32],
     n_per: &[usize],
-    min_size: &[usize],
+    min_size: &[Option<usize>],
     block_of_row: Option<&[u32]>,
     seed: u64,
 ) -> anyhow::Result<GroupedPartition> {
@@ -207,14 +220,14 @@ pub fn partition_modules_by_group(
                 n_k,
                 mix_seed(seed, k as u64),
                 &PartitionOptions {
-                    min_group_size: min_k,
+                    min_group_size: min_k.unwrap_or(0),
                     block: block_of_row.map(|b| rows.iter().map(|&r| b[r]).collect()),
                 },
             )?;
             for (&r, &m) in rows.iter().zip(&part.labels) {
                 labels[r] = (offset + m) as u32;
             }
-            if let (Some(bg), true) = (part.background, min_k > 1) {
+            if let (Some(bg), Some(_)) = (part.background, min_k) {
                 background[offset + bg] = true;
             }
         }
