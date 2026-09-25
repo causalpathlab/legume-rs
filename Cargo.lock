@@ -769,32 +769,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
-name = "cocoa"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "approx",
- "clap",
- "data-beans",
- "env_logger",
- "flate2",
- "indicatif 0.18.6",
- "legume-numeric",
- "log",
- "nalgebra",
- "nalgebra-sparse",
- "ndarray",
- "ndarray-rand",
- "num_cpus",
- "rand 0.10.2",
- "rand_distr 0.6.0",
- "rayon",
- "rustc-hash",
- "special",
- "tempfile",
-]
-
-[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

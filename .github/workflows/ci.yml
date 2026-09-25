@@ -79,7 +79,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Every installable binary forwards data-beans/hdf5; check them all.
       - run: |
-          for crate in senna pinto cocoa chickpea; do
+          for crate in senna pinto chickpea; do
             echo "::group::$crate --features hdf5"
             cargo check -p "$crate" --features hdf5
             echo "::endgroup::"
