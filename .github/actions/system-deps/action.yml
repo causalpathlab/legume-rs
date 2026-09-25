@@ -22,16 +22,11 @@ runs:
         #                    pulls cblas-sys but NO blas-src -- nothing in the
         #                    dependency graph declares the linkage, so a BLAS
         #                    must be present on the host or the link fails.
-        #   rust-htslib      needs clang/libclang for bindgen plus the codec
-        #                    libraries htslib itself links (z, bz2, lzma) and
-        #                    curl/ssl for remote CRAM/BAM.
-        #   libz-sys         data-beans links zlib directly.
+        #   zlib1g-dev       data-beans links zlib directly (libz-sys).
         sudo apt-get install -y --no-install-recommends \
           build-essential pkg-config cmake \
-          clang libclang-dev \
           libopenblas-dev \
-          zlib1g-dev libbz2-dev liblzma-dev \
-          libcurl4-openssl-dev libssl-dev
+          zlib1g-dev
 
     - shell: bash
       if: inputs.hdf5 == 'true'
