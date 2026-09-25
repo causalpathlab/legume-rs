@@ -31,9 +31,9 @@ Alternatively, you can install individual binaries:
 cargo install data-beans
 cargo install faba
 cargo install mung-cnv
+cargo install cocoa-rs
 cargo install --path senna
 cargo install --path pinto
-cargo install --path cocoa
 ```
 
 ## Tools
@@ -50,14 +50,16 @@ Basic utility functions for processing sparse matrices from single-cell omics da
 [`causalpathlab/mung-cnv`](https://github.com/causalpathlab/mung-cnv)
 (`cargo install mung-cnv`).
 
+### cocoa
+**CoCoA**: Counterfactual Confounder Adjustment for Differential Analysis — lives in
+[`causalpathlab/cocoa-rs`](https://github.com/causalpathlab/cocoa-rs)
+(`cargo install cocoa-rs`).
+
 ### senna
 **SENNA**: Stochastic data Embedding with Nearest Neighbourhood Adjustment - embedding and dimensionality reduction tools.
 
 ### pinto
 **PINTO**: Proximity-based Interaction Network analysis to dissect Tissue Organizations - spatial analysis and network tools for tissue organization.
-
-### cocoa
-**CoCoA**: Counterfactual Confounder Adjustment for Differential Analysis - confounder adjustment methods.
 
 ## Documentation
 

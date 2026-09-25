@@ -3,7 +3,6 @@
 members = [
     "annotate",
     "chickpea",
-    "cocoa",
     "enrichment",
     "gene-text",
     "genomic-data",

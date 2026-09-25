@@ -2,14 +2,15 @@ BINARIES := senna pinto cocoa chickpea data-beans data-beans-sim gene-text lupin
 
 # Packages whose crate directory / Cargo package name differs from the
 # installed binary name. `mung` is the CLI of crates.io package `mung-cnv`
-# (lib remains `cnv`). `data-beans-sim` is a binary of the `data-beans`
-# package (feature `sim`).
+# (lib remains `cnv`). `cocoa` is the CLI of crates.io package `cocoa-rs`.
+# `data-beans-sim` is a binary of the `data-beans` package (feature `sim`).
 #
 # The mapping has to happen in the shell, not with a make function: the loops
 # below iterate over `$$bin` inside a recipe, so make would only ever see the
 # literal text `$$bin` and never match it.
 crate_pkg_case = case $$bin in \
 	mung) pkg=mung-cnv; extra_feat=; from_crates=1;; \
+	cocoa) pkg=cocoa-rs; extra_feat=; from_crates=1;; \
 	data-beans) pkg=data-beans; extra_feat=; from_crates=1;; \
 	data-beans-sim) pkg=data-beans; extra_feat=sim; from_crates=1;; \
 	*) pkg=$$bin; extra_feat=; from_crates=;; \
@@ -19,7 +20,7 @@ crate_pkg_case = case $$bin in \
 # feature these crates do not declare makes cargo fail, which the loops below
 # would then "recover" from by retrying on CPU -- a wasted compile and a
 # summary line that reads like a GPU failure. Build them as CPU directly.
-# (faba / mung used to be path installs; they now live on crates.io.)
+# (faba / mung / cocoa used to be path installs; they now live on crates.io.)
 CPU_ONLY_BINARIES :=
 
 # Backend selection.
