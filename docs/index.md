@@ -1,68 +1,46 @@
 <!---------------------------------------------------------------------------->
-<!-- Rules for vignettes												    -->
-<!-- 																	    -->
-<!-- 1. use legume CLI tools											    -->
-<!-- 																	    -->
-<!-- 2. use R, don't use Python											    -->
-<!-- 																	    -->
-<!-- 3. save intermediate files with "temp" prefix not to be kept in github -->
-<!-- 4. keep intermediate results in temp folder to avoid re-running same steps -->
+<!-- Rules for vignettes                                                    -->
+<!--                                                                        -->
+<!-- 1. use legume CLI tools                                                -->
+<!-- 2. use R, don't use Python                                             -->
+<!-- 3. save intermediate files with "temp" prefix (not kept in github)     -->
+<!-- 4. keep intermediate results in temp/ to avoid re-running same steps   -->
 <!---------------------------------------------------------------------------->
 
-# `legume-rs`: Library for Exploring Genomics Using Machine learning Essentials
+# legume-rs
 
-This is a command line based tool that runs on Unix-like environments.
+CLI tools for genomics / single-cell analysis on Unix-like systems. See the
+[GitHub README](https://github.com/causalpathlab/legume-rs) for the full
+install and backend notes.
 
-## Installation
-
-0. Install `Rust` environment, e.g., using [`rustup`](https://rustup.rs/)
-
-1. Clone this repo
-
-2. Install all binaries to your local executable directory (e.g., `~/.cargo/bin/`):
+## Quick install
 
 ```sh
+# from a clone of this repo (path + crates.io binaries):
 make install
-```
 
-Alternatively, you can install individual binaries:
-
-```sh
-cargo install data-beans
-cargo install faba
-cargo install mung-cnv
-cargo install cocoa-rs
-cargo install pinto-rs
+# or pick packages:
+cargo install data-beans faba mung-cnv cocoa-rs pinto-rs
 cargo install --path senna
+cargo install --path lupin
+cargo install --path chickpea
+cargo install --path gene-text
 ```
 
-## Tools
+## Tools in this repo
 
-### data-beans
-Basic utility functions for processing sparse matrices from single-cell omics data.
+- **senna** — stochastic embedding with nearest-neighbourhood adjustment
+- **lupin** — text, annotate, lineage, describe
+- **chickpea** — peak-to-gene / multiome workflows
+- **gene-text** — gene-text utilities
 
-### faba
-**FABA**: Feature statistics Accumulator for Base-pair-level Analysis — lives in
-[`causalpathlab/faba`](https://github.com/causalpathlab/faba) (`cargo install faba`).
+## Extracted tools
 
-### mung
-**MUNG**: Malignancy Unmixing on Normalized Genomes with CNV estimation — lives in
-[`causalpathlab/mung-cnv`](https://github.com/causalpathlab/mung-cnv)
-(`cargo install mung-cnv`).
-
-### cocoa
-**CoCoA**: Counterfactual Confounder Adjustment for Differential Analysis — lives in
-[`causalpathlab/cocoa-rs`](https://github.com/causalpathlab/cocoa-rs)
-(`cargo install cocoa-rs`).
-
-### senna
-**SENNA**: Stochastic data Embedding with Nearest Neighbourhood Adjustment - embedding and dimensionality reduction tools.
-
-### pinto
-**PINTO**: Proximity-based Interaction Network analysis to dissect Tissue Organizations — lives in
-[`causalpathlab/pinto-rs`](https://github.com/causalpathlab/pinto-rs)
-(`cargo install pinto-rs`).
-
-## Documentation
-
-For more details, visit the [GitHub repository](https://github.com/causalpathlab/legume-rs).
+| Binary | Install | Repo |
+| --- | --- | --- |
+| `data-beans` | `cargo install data-beans` | crates.io |
+| `faba` | `cargo install faba` | [faba](https://github.com/causalpathlab/faba) |
+| `mung` | `cargo install mung-cnv` | [mung-cnv](https://github.com/causalpathlab/mung-cnv) |
+| `cocoa` | `cargo install cocoa-rs` | [cocoa-rs](https://github.com/causalpathlab/cocoa-rs) |
+| `pinto` | `cargo install pinto-rs` | [pinto-rs](https://github.com/causalpathlab/pinto-rs) |
+| `fqtl` | see repo | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
