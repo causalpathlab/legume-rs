@@ -1,6 +1,6 @@
 # lupin
 
-**L**exicon-**U**sing **P**rojection for **I**dentity **N**aming
+**L**abel, **U**nfold, **P**lace, **I**nterpret, **N**arrate
 
 Text graphs, cell-type annotation, lineage, and short citation-checked descriptions.
 
