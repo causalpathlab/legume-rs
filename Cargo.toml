@@ -4,7 +4,6 @@ members = [
     "annotate",
     "chickpea",
     "gene-text",
-    "genomic-data",
     "lineage",
     "lupin",
     "plot-utils",
@@ -90,7 +89,7 @@ wide = "0.7"
 cnv = { version = "0.2.1", package = "mung-cnv" }
 data-beans = { version = "0.6.12" }
 enrichment = { version = "0.3.9", package = "legume-enrichment" }
-genomic-data = { version = "0.4.0", path = "genomic-data", package = "legume-genomic-types" }
+genomic-data = { version = "0.4.1", package = "legume-genomic-types" }
 graph-embedding-util = { version = "0.8.4", package = "legume-graph-embedding" }
 hsblock = { version = "0.1.1", package = "hsblock-rs" }
 legume-numeric = { version = "0.8.10" }

@@ -12,8 +12,7 @@ for Unix-like environments.
 | `chickpea` | Peak-to-gene and related multiome workflows |
 | `gene-text` | Gene-text utilities |
 
-Supporting workspace crates: `annotate`, `lineage`, `plot-utils`,
-`genomic-data` (published as [`legume-genomic-types`](https://crates.io/crates/legume-genomic-types)).
+Supporting workspace crates: `annotate`, `lineage`, `plot-utils`.
 
 ## Extracted tools
 
