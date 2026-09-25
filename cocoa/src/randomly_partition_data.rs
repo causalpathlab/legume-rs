@@ -32,6 +32,9 @@ pub trait RandPartitionOps {
         T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
 }
 
+/// Likelihood sweeps moving cells between pseudobulks.
+const REFINE_SWEEPS: usize = 10;
+
 /// How cells are binned into pseudobulks.
 pub struct PartitionSpec {
     pub proj_dim: usize,
@@ -42,8 +45,6 @@ pub struct PartitionSpec {
     /// individuals a pseudobulk needs
     pub min_individuals: usize,
     pub block_size: usize,
-    /// likelihood sweeps moving cells between pseudobulks (0 = none)
-    pub refine_sweeps: usize,
 }
 
 /// Bits for the partition: about two cells per individual per pseudobulk on
@@ -71,7 +72,7 @@ where
     T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
 {
     let refine = MixedRefineParams {
-        max_sweeps: spec.refine_sweeps,
+        max_sweeps: REFINE_SWEEPS,
         block_size: Some(spec.block_size),
         ..MixedRefineParams::default()
     };

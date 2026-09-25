@@ -27,6 +27,7 @@ fn required_arguments_parse() {
 fn removed_switches_are_rejected() {
     for flag in [
         "--no-refine",
+        "--pb-refine-sweeps",
         "--no-residualize-topics",
         "--no-adjust-housekeeping",
     ] {
