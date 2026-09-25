@@ -115,7 +115,7 @@ wide = "0.7"
 
 # Published foundation / product crates (also developed in their own repos)
 cnv = { version = "0.2.1", package = "mung-cnv" }
-data-beans = { version = "0.6.10" }
+data-beans = { version = "0.6.11" }
 enrichment = { path = "enrichment" }
 genomic-data = { version = "0.4.0", path = "genomic-data", package = "legume-genomic-types" }
 graph-embedding-util = { path = "graph-embedding-util" }

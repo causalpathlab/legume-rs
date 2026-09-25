@@ -126,6 +126,17 @@ pub struct SimColliderArgs {
 
     #[arg(
         long,
+        default_value_t = 0.0,
+        help = "SD of the per-gene cell-type baseline Δ(g,A) on the log scale",
+        long_help = "Each gene gets a baseline log rate per cell type, Δ(g,A) ~ N(0, SD^2).\n\
+                     With SD > 0 cell types differ in expression, so an individual's\n\
+                     cell-type mix shifts its pseudobulk. 0 keeps cell type acting\n\
+                     only through U."
+    )]
+    celltype_baseline_sd: f32,
+
+    #[arg(
+        long,
         value_delimiter = ',',
         default_value = "1.0,1.0",
         value_name = "SHAPE,RATE",
@@ -188,6 +199,7 @@ struct ColliderSimulator {
     pve_covar_gene: f32,
     pve_cell_covar_gene: f32,
     effect_size: f32,
+    celltype_baseline_sd: f32,
     rseed: u64,
     depth_gamma_hyperparam: (f32, f32),
 }
@@ -214,6 +226,14 @@ struct CellOut {
     confounder_u: Mat,
     /// P(A_{ij} = k | X_i, U_j): propensity scores (n_cells x n_cell_types)
     propensity_a: Mat,
+    /// planted V -> Y term, gene x individual
+    confounding_part: Mat,
+    /// planted cell-type baseline Δ(g,A), gene x cell type
+    celltype_baseline: Mat,
+    /// per exposure level: sum over cells of exp(U -> Y term), one
+    /// cell type x gene matrix each, and the cell counts per cell type
+    u_exp_sum: Vec<Mat>,
+    u_count: Vec<DVec>,
 }
 
 /// Gene metadata
@@ -298,6 +318,10 @@ impl ColliderSimulator {
     ///   U_j ~ N(0, I)
     ///   A_{ij} ~ Cat(softmax(U_j * delta_k + X_i * eta_k + eps))  [collider]
     ///   log mu_{ij,g} = Δ_{g,A} + β_g * X_i + V_i * γ_g + U_j * ξ_g + ε
+    ///
+    /// `Δ_{g,A} ~ N(0, celltype_baseline_sd^2)` (zero by default, when cell
+    /// type acts only through U). Conditioning on cell type makes U, and hence
+    /// expression, differ between exposures within a type.
     ///   Y_{ij,g} ~ Poisson(ρ_j * exp(log mu))
     fn generate_cells_with_collider(
         &self,
@@ -331,6 +355,8 @@ impl ColliderSimulator {
             .transpose()
             .normalize_columns()
             .transpose();
+        // Δ(g,A): per-gene baseline of each cell type
+        let delta_ga = Mat::rnorm(n_genes, n_ct) * self.celltype_baseline_sd;
         let xi_gk = Mat::rnorm(n_genes, n_cell_covar)
             .transpose()
             .normalize_columns()
@@ -428,7 +454,8 @@ impl ColliderSimulator {
                             val * pve_residual_gene.sqrt()
                         };
 
-                        let log_mu = causal_term + v_term + u_term + eps;
+                        let log_mu =
+                            delta_ga[(g, celltypes[j])] + causal_term + v_term + u_term + eps;
                         let lambda = (rho_j * log_mu.exp()).max(MIN_LAMBDA);
 
                         if let Ok(rpois) = Poisson::new(lambda) {
@@ -440,7 +467,18 @@ impl ColliderSimulator {
                     }
                 }
 
-                (indv, nn, triplets, celltypes, u_mat, prop_a)
+                // exp(U -> Y term) summed per cell type, for the planted
+                // collider shift
+                let mut u_sum = Mat::zeros(n_ct, n_genes);
+                let mut u_cnt = DVec::zeros(n_ct);
+                for (j, &k) in celltypes.iter().enumerate() {
+                    u_cnt[k] += 1.0;
+                    for g in 0..n_genes {
+                        u_sum[(k, g)] += (u_effect_g[(j, g)] * pve_cell_gene.sqrt()).exp();
+                    }
+                }
+
+                (indv, nn, triplets, celltypes, u_mat, prop_a, u_sum, u_cnt)
             })
             .collect();
 
@@ -450,7 +488,7 @@ impl ColliderSimulator {
 
         let mut cumsum = 0_u64;
         let mut indv_offset: HashMap<usize, u64> = Default::default();
-        for &(indv, nn, _, _, _, _) in &sorted {
+        for &(indv, nn, ..) in &sorted {
             indv_offset.insert(indv, cumsum);
             cumsum += nn as u64;
         }
@@ -467,7 +505,19 @@ impl ColliderSimulator {
         let mut u_rows = Vec::with_capacity(n_total_cells);
         let mut prop_a_rows = Vec::with_capacity(n_total_cells);
 
-        for &(indv, nn, _, ref ct, ref u_mat, ref pa) in &sorted {
+        // planted U terms, pooled by exposure level
+        let mut u_exp_sum = vec![Mat::zeros(n_ct, n_genes); self.n_exp_cat];
+        let mut u_count = vec![DVec::zeros(n_ct); self.n_exp_cat];
+        for (indv, _, _, _, _, _, u_sum, u_cnt) in &sorted {
+            let x = indv_out.exposure_assignment[*indv];
+            u_exp_sum[x] += u_sum;
+            u_count[x] += u_cnt;
+        }
+        // planted V -> Y term, gene x individual
+        let confounding_part =
+            (&indv_out.confounder_v * gamma_gk.transpose()).transpose() * pve_covar_gene.sqrt();
+
+        for &(indv, nn, _, ref ct, ref u_mat, ref pa, ..) in &sorted {
             for (j, &ct_j) in ct.iter().enumerate().take(nn) {
                 samples.push(indv);
                 celltypes_all.push(ct_j);
@@ -482,7 +532,7 @@ impl ColliderSimulator {
         // Offset triplet column indices
         let triplets: Vec<(u64, u64, f32)> = sorted
             .into_iter()
-            .flat_map(|(indv, _, trips, _, _, _)| {
+            .flat_map(|(indv, _, trips, ..)| {
                 let base = *indv_offset.get(&indv).unwrap();
                 trips.into_iter().map(move |(g, j, y)| (g, j + base, y))
             })
@@ -497,6 +547,10 @@ impl ColliderSimulator {
             celltypes: celltypes_all,
             confounder_u,
             propensity_a,
+            confounding_part,
+            celltype_baseline: delta_ga,
+            u_exp_sum,
+            u_count,
         })
     }
 }
@@ -551,6 +605,7 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
         pve_covar_gene: args.pve_covar_gene,
         pve_cell_covar_gene: args.pve_cell_covar_gene,
         effect_size: args.effect_size,
+        celltype_baseline_sd: args.celltype_baseline_sd,
         rseed: args.rseed,
         depth_gamma_hyperparam,
     };
@@ -624,6 +679,34 @@ pub fn run_sim_collider_data(args: SimColliderArgs) -> anyhow::Result<()> {
     indv_out.propensity_x.to_tsv(&prop_x_file)?;
 
     // P(A|X,U) propensity scores
+    // planted parts, for scoring without estimation
+    let exposure_part = Mat::from_fn(args.n_genes, sim.n_indv, |g, i| {
+        gene_info
+            .causal_effects
+            .get(&g)
+            .map_or(0.0, |(_, eff)| eff[(0, i)] * args.pve_exposure_gene.sqrt())
+    });
+    exposure_part.to_tsv(&(output.to_string() + ".planted_exposure.tsv.gz"))?;
+    cell_out
+        .confounding_part
+        .to_tsv(&(output.to_string() + ".planted_confounding.tsv.gz"))?;
+    cell_out
+        .celltype_baseline
+        .to_tsv(&(output.to_string() + ".planted_celltype_baseline.tsv.gz"))?;
+    if args.n_exposure >= 2 {
+        // per gene and cell type: log mean exp(U term) in level 1 minus level 0
+        let (s1, c1) = (&cell_out.u_exp_sum[1], &cell_out.u_count[1]);
+        let (s0, c0) = (&cell_out.u_exp_sum[0], &cell_out.u_count[0]);
+        let shift = Mat::from_fn(args.n_genes, args.n_cell_types, |g, k| {
+            if c1[k] > 0.0 && c0[k] > 0.0 {
+                (s1[(k, g)] / c1[k]).ln() - (s0[(k, g)] / c0[k]).ln()
+            } else {
+                f32::NAN
+            }
+        });
+        shift.to_tsv(&(output.to_string() + ".planted_collider_shift.tsv.gz"))?;
+    }
+
     let prop_a_file = output.to_string() + ".propensity_A.tsv.gz";
     cell_out.propensity_a.to_tsv(&prop_a_file)?;
 

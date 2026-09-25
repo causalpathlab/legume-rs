@@ -50,6 +50,10 @@ struct GlmOut {
     /// Per gene `(m_g, phi_g)`: baseline mean rate per cell and the planted
     /// between-individual dispersion; `None` without a dispersion trend.
     dispersion_m: Option<Vec<(f32, f32)>>,
+    /// Planted parts of each gene's log rate, gene x individual: the
+    /// exposure effect (zero for non-causal genes) and the confounding term.
+    exposure_part_mn: Mat,
+    confounding_part_mn: Mat,
 }
 
 /// One simulated gene: its log rate over individuals and, with a planted
@@ -58,6 +62,8 @@ struct GeneDraw {
     gene: usize,
     log_rate: Mat,
     planted: Option<(f32, f32)>,
+    exposure_part: Mat,
+    confounding_part: Mat,
 }
 
 struct TripletsOut {
@@ -149,6 +155,11 @@ impl GlmSimulator {
                     .for_each(|x| *x = (*x - mu_covar) / sig_covar);
 
                 // Fixed part: exposure effect (causal genes) and confounding.
+                let confounding_part = &covar_n * self.pve_covar.sqrt();
+                let exposure_part = match causal_genes.get(&g) {
+                    Some((_cat, assign)) => assign * self.pve_gene.max(0.).sqrt(),
+                    None => Mat::zeros(1, self.n_indv),
+                };
                 let (fixed_n, pve_fixed) = if let Some((_cat, assign)) = causal_genes.get(&g) {
                     (
                         assign * self.pve_gene.max(0.).sqrt() + covar_n * self.pve_covar.sqrt(),
@@ -176,6 +187,8 @@ impl GlmSimulator {
                             gene: g,
                             log_rate,
                             planted: Some((m_g, phi)),
+                            exposure_part,
+                            confounding_part,
                         }
                     }
                     None => {
@@ -187,6 +200,8 @@ impl GlmSimulator {
                             gene: g,
                             log_rate,
                             planted: None,
+                            exposure_part,
+                            confounding_part,
                         }
                     }
                 }
@@ -197,6 +212,16 @@ impl GlmSimulator {
         let dispersion_m = self
             .indv_dispersion
             .map(|_| data.iter().map(|d| d.planted.expect("planted")).collect());
+        let rows_of = |f: &dyn Fn(&GeneDraw) -> &Mat| -> Mat {
+            Mat::from_rows(
+                &data
+                    .iter()
+                    .map(|d| f(d).row(0).into_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let exposure_part_mn = rows_of(&|d| &d.exposure_part);
+        let confounding_part_mn = rows_of(&|d| &d.confounding_part);
         let data_mn = data
             .into_iter()
             .map(|d| d.log_rate.row(0).into_owned())
@@ -208,6 +233,8 @@ impl GlmSimulator {
             confounder_nk,
             causal_m: causal_genes.into_iter().map(|(g, (c, _))| (g, c)).collect(),
             dispersion_m,
+            exposure_part_mn,
+            confounding_part_mn,
         })
     }
 
@@ -547,6 +574,11 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     )?;
     glm.confounder_nk.to_tsv(&conf_file)?;
     glm.data_mn.to_tsv(&data_file)?;
+    // planted components of the log rates, for scoring without estimation
+    glm.exposure_part_mn
+        .to_tsv(&mtx_file.replace(".mtx.gz", ".planted_exposure.tsv.gz"))?;
+    glm.confounding_part_mn
+        .to_tsv(&mtx_file.replace(".mtx.gz", ".planted_confounding.tsv.gz"))?;
     if let (Some(disp), Some((a, b, s0))) = (glm.dispersion_m.as_ref(), indv_dispersion) {
         let disp_file = mtx_file.replace(".mtx.gz", ".dispersion.tsv.gz");
         let mut lines = vec!["gene\tmean\tphi".to_string()];
