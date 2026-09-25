@@ -50,6 +50,10 @@ struct GlmOut {
     /// Per gene `(m_g, phi_g)`: baseline mean rate per cell and the planted
     /// between-individual dispersion; `None` without a dispersion trend.
     dispersion_m: Option<Vec<(f32, f32)>>,
+    /// Planted parts of each gene's log rate, gene x individual: the
+    /// exposure effect (zero for non-causal genes) and the confounding term.
+    exposure_part_mn: Mat,
+    confounding_part_mn: Mat,
 }
 
 /// One simulated gene: its log rate over individuals and, with a planted
@@ -58,6 +62,8 @@ struct GeneDraw {
     gene: usize,
     log_rate: Mat,
     planted: Option<(f32, f32)>,
+    exposure_part: Mat,
+    confounding_part: Mat,
 }
 
 struct TripletsOut {
@@ -67,6 +73,9 @@ struct TripletsOut {
 }
 
 /// `N(0, sd)` draw, or exactly zero when `sd` is zero.
+/// Seed tag offset for the per-individual cell streams.
+const CELL_SEED_TAG: u64 = 1 << 32;
+
 fn normal_or_zero(rng: &mut rand::rngs::StdRng, sd: f32) -> f32 {
     if sd > 0.0 {
         Normal::new(0.0, sd).expect("positive sd").sample(rng)
@@ -85,15 +94,18 @@ impl GlmSimulator {
     ///
     fn generate_individual_glm(&self) -> anyhow::Result<GlmOut> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.rseed);
+        // one stream per draw, all from `rseed`
+        let seed = |tag: u64| legume_numeric::matrix::rand_util::mix_seed(self.rseed, tag);
 
         // 1. Generate confounding factors
-        let confounder_nk = Mat::rnorm(self.n_indv, self.n_covar);
+        let confounder_nk = Mat::rnorm_seeded(self.n_indv, self.n_covar, seed(1));
 
         // 2. Generate multinomial exposure assignment (sample x gene)
         // x(i,c) ~ multinomial( sum w(i,k) * effect(k,c) + eps )
-        let effect_kc = Mat::rnorm(self.n_covar, self.n_exp_cat);
+        let effect_kc = Mat::rnorm_seeded(self.n_covar, self.n_exp_cat, seed(2));
 
-        let logits_nc = Mat::rnorm(self.n_indv, self.n_exp_cat) * (1. - self.pve_exposure)
+        let logits_nc = Mat::rnorm_seeded(self.n_indv, self.n_exp_cat, seed(3))
+            * (1. - self.pve_exposure)
             + (&confounder_nk * effect_kc).scale_columns() * self.pve_exposure;
 
         let assignment_n = sample_logits_each_row(logits_nc, &mut rng)?;
@@ -149,6 +161,11 @@ impl GlmSimulator {
                     .for_each(|x| *x = (*x - mu_covar) / sig_covar);
 
                 // Fixed part: exposure effect (causal genes) and confounding.
+                let confounding_part = &covar_n * self.pve_covar.sqrt();
+                let exposure_part = match causal_genes.get(&g) {
+                    Some((_cat, assign)) => assign * self.pve_gene.max(0.).sqrt(),
+                    None => Mat::zeros(1, self.n_indv),
+                };
                 let (fixed_n, pve_fixed) = if let Some((_cat, assign)) = causal_genes.get(&g) {
                     (
                         assign * self.pve_gene.max(0.).sqrt() + covar_n * self.pve_covar.sqrt(),
@@ -176,6 +193,8 @@ impl GlmSimulator {
                             gene: g,
                             log_rate,
                             planted: Some((m_g, phi)),
+                            exposure_part,
+                            confounding_part,
                         }
                     }
                     None => {
@@ -187,6 +206,8 @@ impl GlmSimulator {
                             gene: g,
                             log_rate,
                             planted: None,
+                            exposure_part,
+                            confounding_part,
                         }
                     }
                 }
@@ -197,6 +218,16 @@ impl GlmSimulator {
         let dispersion_m = self
             .indv_dispersion
             .map(|_| data.iter().map(|d| d.planted.expect("planted")).collect());
+        let rows_of = |f: &dyn Fn(&GeneDraw) -> &Mat| -> Mat {
+            Mat::from_rows(
+                &data
+                    .iter()
+                    .map(|d| f(d).row(0).into_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let exposure_part_mn = rows_of(&|d| &d.exposure_part);
+        let confounding_part_mn = rows_of(&|d| &d.confounding_part);
         let data_mn = data
             .into_iter()
             .map(|d| d.log_rate.row(0).into_owned())
@@ -208,6 +239,8 @@ impl GlmSimulator {
             confounder_nk,
             causal_m: causal_genes.into_iter().map(|(g, (c, _))| (g, c)).collect(),
             dispersion_m,
+            exposure_part_mn,
+            confounding_part_mn,
         })
     }
 
@@ -238,8 +271,18 @@ impl GlmSimulator {
             .enumerate()
             .filter_map(
                 |(indv, nn)| -> Option<(usize, usize, Vec<(u64, u64, f32)>)> {
-                    let mut rng = rand::rng();
-                    let rho_m = Mat::rgamma(1, nn, self.depth_gamma_hyperparam);
+                    // one stream per individual, so rayon's order does not matter
+                    let indv_seed = legume_numeric::matrix::rand_util::mix_seed(
+                        self.rseed,
+                        CELL_SEED_TAG + indv as u64,
+                    );
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(indv_seed);
+                    let rho_m = Mat::rgamma_seeded(
+                        1,
+                        nn,
+                        self.depth_gamma_hyperparam,
+                        indv_seed.wrapping_add(1),
+                    );
                     let mu_g = ln_mu_gn.column(indv).map(|x| x.exp()).clone();
                     let mut _triplets = Vec::with_capacity(nn * n_genes);
 
@@ -547,6 +590,11 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     )?;
     glm.confounder_nk.to_tsv(&conf_file)?;
     glm.data_mn.to_tsv(&data_file)?;
+    // planted components of the log rates, for scoring without estimation
+    glm.exposure_part_mn
+        .to_tsv(&mtx_file.replace(".mtx.gz", ".planted_exposure.tsv.gz"))?;
+    glm.confounding_part_mn
+        .to_tsv(&mtx_file.replace(".mtx.gz", ".planted_confounding.tsv.gz"))?;
     if let (Some(disp), Some((a, b, s0))) = (glm.dispersion_m.as_ref(), indv_dispersion) {
         let disp_file = mtx_file.replace(".mtx.gz", ".dispersion.tsv.gz");
         let mut lines = vec!["gene\tmean\tphi".to_string()];
