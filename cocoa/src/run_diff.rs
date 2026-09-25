@@ -563,13 +563,13 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             })
             .collect()
     };
-    if args.n_permutations > 0
-        && permutations_degenerate(&permuted_exposures, MIN_DISTINCT_PERMUTATIONS)
-    {
+    // with few draws, repeats are expected even from a healthy sampler
+    let min_distinct = MIN_DISTINCT_PERMUTATIONS.min(args.n_permutations.div_ceil(2));
+    if args.n_permutations > 0 && permutations_degenerate(&permuted_exposures, min_distinct) {
         warn!(
             "the permutation draws hold fewer than {} distinct relabelings: \
              no gene is tested",
-            MIN_DISTINCT_PERMUTATIONS
+            min_distinct
         );
         mask.flag_all(Flag::DegenerateNull);
     }

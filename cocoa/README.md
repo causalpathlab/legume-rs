@@ -212,7 +212,7 @@ tested genes and otherwise names the reason:
 | `level_zero` | gene, topic | every individual of some exposure level has zero counts (the effect is unbounded) |
 | `level_sparse` | topic | some level has fewer than 3 individuals with cells in the topic |
 | `weak_overlap` | run | some exposure arm has a propensity effective sample size below 3 |
-| `degenerate_null` | run | the permutation draws hold fewer than 20 distinct relabelings |
+| `degenerate_null` | run | the permutation draws hold fewer than 20 distinct relabelings (or fewer than half the draws, when fewer than 40 are requested) |
 
 A gene's contrast averages its unflagged topics only; with none left, the
 gene takes the flag of its first topic and NA contrast and p-values. A

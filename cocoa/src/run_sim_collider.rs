@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::run_sim_one_type::sample_logits_each_row;
+use legume_numeric::matrix::rand_util::mix_seed;
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -244,6 +245,9 @@ struct GeneInfo {
     causal_effects: HashMap<usize, (usize, Mat)>,
 }
 
+/// Seed tag offset for the per-individual cell streams.
+const CELL_SEED_TAG: u64 = 1 << 32;
+
 impl ColliderSimulator {
     /// Phase 1: Generate individual-level confounders and exposure assignment
     ///
@@ -251,14 +255,16 @@ impl ColliderSimulator {
     /// X_i ~ Categorical(softmax(V_i * alpha + eps))
     fn generate_individual_level(&self) -> anyhow::Result<IndividualOut> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.rseed);
+        let seed = |tag: u64| mix_seed(self.rseed, tag);
 
         // V_i: individual-level confounders
-        let confounder_v = Mat::rnorm(self.n_indv, self.n_covar);
+        let confounder_v = Mat::rnorm_seeded(self.n_indv, self.n_covar, seed(1));
 
         // Exposure assignment: logit(X_i) ~ V_i * alpha + eps
-        let alpha_kc = Mat::rnorm(self.n_covar, self.n_exp_cat);
+        let alpha_kc = Mat::rnorm_seeded(self.n_covar, self.n_exp_cat, seed(2));
 
-        let logits_nc = Mat::rnorm(self.n_indv, self.n_exp_cat) * (1. - self.pve_covar_exposure)
+        let logits_nc = Mat::rnorm_seeded(self.n_indv, self.n_exp_cat, seed(3))
+            * (1. - self.pve_covar_exposure)
             + (&confounder_v * alpha_kc).scale_columns() * self.pve_covar_exposure;
 
         // Compute P(X|V) propensity scores before sampling
@@ -336,6 +342,8 @@ impl ColliderSimulator {
         // Sample number of cells per individual
         let rpois = Poisson::new(self.n_cells_per_indv as f32)?;
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.rseed.wrapping_add(2));
+        // one stream per draw (and per individual), all from `rseed`
+        let seed = |tag: u64| mix_seed(self.rseed, tag);
 
         let num_cells: Vec<usize> = (0..n_indv)
             .map(|_| (rpois.sample(&mut rng) as usize).max(1))
@@ -344,20 +352,20 @@ impl ColliderSimulator {
         // Shared cell-type assignment coefficients (fixed across all cells)
         // delta: U -> A effect (n_cell_covar x n_cell_types)
         // eta: X -> A effect (n_exp_cat x n_cell_types)
-        let delta = Mat::rnorm(n_cell_covar, n_ct);
-        let eta = Mat::rnorm(self.n_exp_cat, n_ct);
+        let delta = Mat::rnorm_seeded(n_cell_covar, n_ct, seed(4));
+        let eta = Mat::rnorm_seeded(self.n_exp_cat, n_ct, seed(5));
 
         // Gene-specific confounder loadings (V -> Y and U -> Y)
         // gamma_g: V loading per gene (n_genes x n_covar)
         // xi_g: U loading per gene (n_genes x n_cell_covar)
         // Normalize rows to unit L2 norm so Var(V * gamma_g^T) = 1
-        let gamma_gk = Mat::rnorm(n_genes, self.n_covar)
+        let gamma_gk = Mat::rnorm_seeded(n_genes, self.n_covar, seed(6))
             .transpose()
             .normalize_columns()
             .transpose();
         // Δ(g,A): per-gene baseline of each cell type
-        let delta_ga = Mat::rnorm(n_genes, n_ct) * self.celltype_baseline_sd;
-        let xi_gk = Mat::rnorm(n_genes, n_cell_covar)
+        let delta_ga = Mat::rnorm_seeded(n_genes, n_ct, seed(7)) * self.celltype_baseline_sd;
+        let xi_gk = Mat::rnorm_seeded(n_genes, n_cell_covar, seed(8))
             .transpose()
             .normalize_columns()
             .transpose();
@@ -392,11 +400,12 @@ impl ColliderSimulator {
                 let v_effect_g = v_i * &gamma_gk.transpose(); // 1 x n_genes
 
                 // Sample U_j for all cells of this individual
-                let u_mat = Mat::rnorm(nn, n_cell_covar); // nn x n_cell_covar
+                let indv_seed = seed(CELL_SEED_TAG + indv as u64);
+                let u_mat = Mat::rnorm_seeded(nn, n_cell_covar, indv_seed); // nn x n_cell_covar
 
                 // Cell type logits: U_j * delta + X_i * eta + noise
                 let u_logit = &u_mat * &delta; // nn x n_ct
-                let noise_ct = Mat::rnorm(nn, n_ct);
+                let noise_ct = Mat::rnorm_seeded(nn, n_ct, indv_seed.wrapping_add(1));
 
                 let pve_residual_ct = (1. - pve_exp_ct - pve_cell_ct).max(0.);
                 let logits = u_logit.scale_columns() * pve_cell_ct.sqrt()
@@ -420,7 +429,7 @@ impl ColliderSimulator {
                 let u_effect_g = &u_mat * &xi_gk.transpose(); // nn x n_genes
 
                 // Cell depth factors
-                let rho = Mat::rgamma(1, nn, depth_gamma);
+                let rho = Mat::rgamma_seeded(1, nn, depth_gamma, indv_seed.wrapping_add(2));
 
                 // Generate triplets: for each cell j, gene g
                 let pve_residual_causal =
