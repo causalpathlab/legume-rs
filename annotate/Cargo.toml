@@ -23,7 +23,6 @@ legume-numeric = { workspace = true, features = ["matrix", "param", "candle"] }
 anyhow = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
-nalgebra = { workspace = true }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
 
