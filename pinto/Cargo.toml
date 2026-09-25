@@ -44,11 +44,9 @@ rayon = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
 ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
 nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
-approx = { workspace = true }
 wide = { workspace = true }
 
 special = { workspace = true }

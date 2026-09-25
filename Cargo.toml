@@ -59,12 +59,9 @@ rand_distr = "0.6"
 tempfile = "3.2"
 
 # Numeric / linear algebra
-approx = "0.5.1"
 nalgebra = "0.34"
 nalgebra-sparse = "0.11"
 ndarray = { version = "0.17", features = ["rayon", "serde", "approx", "blas"] }
-ndarray-rand = "0.16"
-num-traits = "0.2.19"
 special = "0.13"
 statrs = { version = "0.18", default-features = false }
 
@@ -73,33 +70,14 @@ dashmap = { version = "6.1.0", features = ["rayon"] }
 rustc-hash = "2.1"
 
 # Serialization / IO
-flate2 = "1.0.34"
-# arrow and parquet ship as one release train -- bump them together.
-arrow = "59"
 parquet = "59"
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-zip = "8"
-
-# Bioinformatics
-coitrees = "0.4"
-
-# Nearest neighbours / clustering
-instant-distance = "0.6"
-multiversion = "0.8"
-clustering = { version = "0.2", features = ["parallel"] }
-
-# Graphs (MST, Dijkstra, etc.)
-petgraph = "0.8"
-
-# Ontology / OBO flat-file parsing (Cell Ontology DAG)
-fastobo = "0.15"
 
 # Progress / display
 colored = "3"
 indicatif = { version = "^0.18", features = ["rayon"] }
-indicatif-log-bridge = "0.2"
 
 # 2D graphics / SVG (senna plot)
 base64 = "0.22"
