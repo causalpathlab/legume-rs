@@ -2,11 +2,11 @@
 //!
 //! Stage 1 (the pseudobulk baseline) gives each individual a count `y(d,i)`
 //! and an expected count at its own cell states `m(d,i)`, so
-//! `Lambda(d,i) = y / m` is the individual's rate multiplier. With exposure
+//! `omega(d,i) = y / m` is the individual's rate multiplier. With exposure
 //! invariance,
 //!
 //! ```text
-//!   Lambda(d,i) = tau(d, x(i)) * delta(d,i),   delta independent of X given V
+//!   omega(d,i) = tau(d, x(i)) * delta(d,i),   delta independent of X given V
 //! ```
 //!
 //! and, for exposure levels `x = 0..K` with level 0 as the reference,
@@ -16,12 +16,12 @@
 //! G-estimation of causal risk ratios", eq. 6): a Gamma GLM with a log link,
 //!
 //! ```text
-//!   E[Lambda | V, X] = exp( b0 + b_e' e(V) + psi(X) )
+//!   E[omega | V, X] = exp( b0 + b_e' e(V) + psi(X) )
 //! ```
 //!
 //! where `e(V)` are the (unclipped) propensities `P(X = x | V)`. With the
 //! Gamma working variance the score for `psi` is the g-estimating equation
-//! `sum_i (1{X_i = x} - e_x(V_i)) (Lambda_i exp(-psi(X_i)) - q(V_i)) / q(V_i) = 0`
+//! `sum_i (1{X_i = x} - e_x(V_i)) (omega_i exp(-psi(X_i)) - q(V_i)) / q(V_i) = 0`
 //! with `q(V) = exp(b0 + b_e' e(V))` (Robins, Mark & Newey 1992). It is
 //! doubly robust: `psi` is consistent if the propensity is right, whatever the
 //! outcome looks like, or if the outcome depends on V log-linearly through
@@ -30,7 +30,7 @@
 //! clipping is needed. Without a propensity the model holds only the level
 //! indicators and `psi` is the log ratio of means. With a log link and Gamma
 //! variance the working weights are all one, so each scoring step is ordinary
-//! least squares on the working response `eta + Lambda / mu - 1`, with one
+//! least squares on the working response `eta + omega / mu - 1`, with one
 //! projection shared by every gene.
 
 use crate::common::*;
@@ -98,7 +98,7 @@ pub fn estimate_exposure_effect(
     let (n_genes, n_indv) = y_di.shape();
     let used: Vec<usize> = (0..n_indv).filter(|&i| use_i[i]).collect();
 
-    // exposure-free rates H = Lambda exp(-psi(X)), tau(0) their mean
+    // exposure-free rates H = omega exp(-psi(X)), tau(0) their mean
     let n_use = used.len().max(1) as f32;
     let mut tau0 = DVec::zeros(n_genes);
     let mut delta = Mat::zeros(n_genes, n_indv);
@@ -178,7 +178,7 @@ fn fit_log_effects(
         .map(|r0| (r0, GENE_BLOCK.min(n_genes - r0)))
         .collect();
     let solve = |&(r0, nr): &(usize, usize)| {
-        let lambda = Mat::from_fn(nr, used.len(), |d, r| {
+        let omega = Mat::from_fn(nr, used.len(), |d, r| {
             let (yv, mv) = (y_di[(r0 + d, used[r])], m_di[(r0 + d, used[r])]);
             if mv > 0.0 {
                 yv / mv
@@ -186,7 +186,7 @@ fn fit_log_effects(
                 0.0
             }
         });
-        fit_gamma_block(&lambda, &design, &proj)
+        fit_gamma_block(&omega, &design, &proj)
     };
     let outs: Vec<(Mat, usize)> = if parallel {
         blocks.par_iter().map(solve).collect()
@@ -230,24 +230,24 @@ fn least_squares_projection(x: &Mat) -> Mat64 {
 }
 
 /// Fisher scoring for a Gamma GLM with a log link on one block of genes
-/// (rows of `lambda`), all sharing `design`: each step regresses the working
-/// response `eta + lambda / mu - 1` on the design, and a gene keeps the step
-/// only if its quasi-log-likelihood `sum(-lambda / mu - log mu)` does not
+/// (rows of `omega`), all sharing `design`: each step regresses the working
+/// response `eta + omega / mu - 1` on the design, and a gene keeps the step
+/// only if its quasi-log-likelihood `sum(-omega / mu - log mu)` does not
 /// fall, halving it otherwise (plain scoring can oscillate when the working
 /// model is wrong). The linear predictor is carried from step to step, and a
 /// halving trial evaluates only the genes still pending. Runs in f64. Genes
 /// without any positive rate keep a zero effect. Returns the coefficients
 /// (genes x p) and the number of steps.
-fn fit_gamma_block(lambda: &Mat, design: &Mat, proj: &Mat64) -> (Mat, usize) {
-    let lambda = lambda.map(f64::from);
-    let (n_genes, n) = lambda.shape();
+fn fit_gamma_block(omega: &Mat, design: &Mat, proj: &Mat64) -> (Mat, usize) {
+    let omega = omega.map(f64::from);
+    let (n_genes, n) = omega.shape();
     let mut beta = Mat64::zeros(n_genes, design.ncols());
     // start at the overall mean rate
     for d in 0..n_genes {
-        let mean = lambda.row(d).sum() / n.max(1) as f64;
+        let mean = omega.row(d).sum() / n.max(1) as f64;
         beta[(d, 0)] = mean.max(1e-12).ln();
     }
-    let active: Vec<bool> = (0..n_genes).map(|d| lambda.row(d).sum() > 0.0).collect();
+    let active: Vec<bool> = (0..n_genes).map(|d| omega.row(d).sum() > 0.0).collect();
     let design_t = design.transpose().map(f64::from);
     let proj_t = proj.transpose();
 
@@ -256,7 +256,7 @@ fn fit_gamma_block(lambda: &Mat, design: &Mat, proj: &Mat64) -> (Mat, usize) {
         (0..n)
             .map(|i| {
                 let ev = (eta[(d, i)] + t * deta[(d, i)]).clamp(-60.0, 60.0);
-                -lambda[(d, i)] * (-ev).exp() - ev
+                -omega[(d, i)] * (-ev).exp() - ev
             })
             .sum()
     };
@@ -270,7 +270,7 @@ fn fit_gamma_block(lambda: &Mat, design: &Mat, proj: &Mat64) -> (Mat, usize) {
     let mut iterations = 0;
     for it in 0..MAX_ITER {
         iterations = it + 1;
-        for (zv, (&ev, &lv)) in z.iter_mut().zip(eta.iter().zip(lambda.iter())) {
+        for (zv, (&ev, &lv)) in z.iter_mut().zip(eta.iter().zip(omega.iter())) {
             let ev = ev.clamp(-60.0, 60.0);
             *zv = ev + lv * (-ev).exp() - 1.0;
         }
