@@ -38,24 +38,12 @@ graph-embedding-util = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }
-flate2 = { workspace = true }
-num_cpus = { workspace = true }
-rayon = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
-rand_distr = { workspace = true }
 nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
-approx = { workspace = true }
 
-ctrlc = { workspace = true }
 colored = { workspace = true }
-special = { workspace = true }
-indicatif = { workspace = true }
-env_logger = { workspace = true }
 log = { workspace = true }
-dashmap = { workspace = true }
 rustc-hash = { workspace = true }
 
