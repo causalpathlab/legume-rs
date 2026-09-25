@@ -841,7 +841,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cocoa"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -1298,9 +1298,9 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.6.10"
+version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4312541192e32a603c0a44bec84d2582feda0fd1070dbb6a5b31833b38269fb"
+checksum = "f7346d401a691bb59d24c809746f826bf30ed35e65557160b05e8b52735332d8"
 dependencies = [
  "anyhow",
  "approx",

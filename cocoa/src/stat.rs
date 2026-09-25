@@ -1,27 +1,42 @@
 use crate::common::*;
-use legume_numeric::param::dmatrix_gamma::GammaMatrix;
-use legume_numeric::param::traits::CalibrateTarget;
-use legume_numeric::param::traits::Inference;
-use legume_numeric::param::traits::*;
 use rayon::prelude::*;
 use special::Error;
 
-mod group;
-pub use group::*;
+mod baseline;
+pub use baseline::*;
+pub mod control_factors;
+pub mod estimability;
+pub mod propensity;
+pub mod propensity_effect;
+#[cfg(test)]
+pub(crate) mod test_util;
 
 #[cfg(test)]
 mod tests;
 
 pub struct CocoaStat {
-    y1_sum_dp_vec: Vec<Mat>, // cell type topic x gene x pseudobulk sample
-    y0_sum_dp_vec: Vec<Mat>, // cell type topic x gene x pseudobulk sample
-    size_p_vec: Vec<DVec>,   // cell type topic x pseudobulk sample
-    y1_sum_di_vec: Vec<Mat>, // cell type topic x gene x individual
-    size_ip_vec: Vec<Mat>,   // cell type topic x individual x pseudobulk sample
-    n_topics: usize,         // number of  cell types
-    n_opt_iter: usize,       // iterative optimization
-    a0: f32,                 // hyper parameters
-    b0: f32,                 // hyper parameters
+    y1_sum_dp_vec: Vec<Mat>,  // cell type topic x gene x pseudobulk sample
+    y1_sum_di_vec: Vec<Mat>,  // cell type topic x gene x individual
+    size_ip_vec: Vec<Mat>,    // cell type topic x individual x pseudobulk sample
+    mixing: Vec<TopicMixing>, // per topic: how well pseudobulks pool individuals
+    n_topics: usize,          // number of  cell types
+    n_opt_iter: usize,        // iterative optimization
+    a0: f32,                  // hyper parameters
+    b0: f32,                  // hyper parameters
+}
+
+/// How well one topic's pseudobulks pool individuals. A pseudobulk that
+/// holds too few individuals cannot separate its cell-state rate from their
+/// multipliers, and is dropped from the topic.
+#[derive(Clone, Default)]
+pub struct TopicMixing {
+    pub pseudobulks_kept: usize,
+    pub pseudobulks_dropped: usize,
+    /// topic weight (cells) kept and dropped
+    pub cells_kept: f32,
+    pub cells_dropped: f32,
+    /// individuals in each kept pseudobulk
+    pub individuals_per_pseudobulk: Vec<usize>,
 }
 
 pub struct CocoaStatArgs {
@@ -47,10 +62,9 @@ impl CocoaStat {
 
         Self {
             y1_sum_dp_vec: vec![Mat::zeros(n_genes, n_samples); n_topics],
-            y0_sum_dp_vec: vec![Mat::zeros(n_genes, n_samples); n_topics],
-            size_p_vec: vec![DVec::zeros(n_samples); n_topics],
             y1_sum_di_vec: vec![Mat::zeros(n_genes, n_indv); n_topics],
             size_ip_vec: vec![Mat::zeros(n_indv, n_samples); n_topics],
+            mixing: vec![TopicMixing::default(); n_topics],
             n_topics,
             n_opt_iter: n_opt_iter.unwrap_or(100),
             a0: a0.unwrap_or(1.),
@@ -60,14 +74,6 @@ impl CocoaStat {
 
     pub fn y1_stat_mut(&mut self, k: usize) -> &mut Mat {
         &mut self.y1_sum_dp_vec[k]
-    }
-
-    pub fn y0_stat_mut(&mut self, k: usize) -> &mut Mat {
-        &mut self.y0_sum_dp_vec[k]
-    }
-
-    pub fn size_stat_mut(&mut self, k: usize) -> &mut DVec {
-        &mut self.size_p_vec[k]
     }
 
     pub fn indv_y1_stat_mut(&mut self, k: usize) -> &mut Mat {
@@ -82,16 +88,20 @@ impl CocoaStat {
         &self.y1_sum_dp_vec[k]
     }
 
-    pub fn y0_stat(&self, k: usize) -> &Mat {
-        &self.y0_sum_dp_vec[k]
-    }
-
-    pub fn size_stat(&self, k: usize) -> &DVec {
-        &self.size_p_vec[k]
-    }
-
     pub fn indv_y1_stat(&self, k: usize) -> &Mat {
         &self.y1_sum_di_vec[k]
+    }
+
+    pub fn mixing(&self, k: usize) -> &TopicMixing {
+        &self.mixing[k]
+    }
+
+    pub fn mixing_mut(&mut self, k: usize) -> &mut TopicMixing {
+        &mut self.mixing[k]
+    }
+
+    pub fn n_topics(&self) -> usize {
+        self.n_topics
     }
 
     pub fn indv_size_stat(&self, k: usize) -> &Mat {
