@@ -1,4 +1,4 @@
-//! `lupin`: Lexicon-Using Projection for Identity Naming.
+//! `lupin`: Label, Unfold, Place, Interpret, Narrate.
 
 mod annotate;
 mod describe;
@@ -20,7 +20,7 @@ use describe::{run_describe, DescribeArgs};
 #[command(
     name = "lupin",
     version,
-    about = "Lexicon-Using Projection for Identity Naming — text graphs, annotation, lineage, describe."
+    about = "Label, Unfold, Place, Interpret, Narrate — annotation, lineage, pseudotime, association, description."
 )]
 struct Cli {
     #[arg(short, long, global = true, help = "Verbose logging")]

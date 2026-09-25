@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "Lexicon-Using Projection for Identity Naming — text graphs, annotation, lineage, describe"
+description = "Label, Unfold, Place, Interpret, Narrate — annotation, lineage, pseudotime, association, description"
 
 [[bin]]
 name = "lupin"
