@@ -8,6 +8,9 @@
 - **mung** (Malignancy Unmixing on Normalized Genomes with CNV estimation) now lives in
   [`causalpathlab/mung-cnv`](https://github.com/causalpathlab/mung-cnv)
   (`cargo install mung-cnv`).
+- **cocoa** (COunterfactual COnfounder Adjustment) now lives in
+  [`causalpathlab/cocoa-rs`](https://github.com/causalpathlab/cocoa-rs)
+  (`cargo install cocoa-rs`).
 - Shared libraries are published separately:
   [`legume-numeric`](https://crates.io/crates/legume-numeric),
   [`data-beans`](https://crates.io/crates/data-beans),
@@ -40,7 +43,7 @@ cargo install faba                   # Feature statistics Accumulator for Base-p
 cargo install --path senna      # Stochastic data Embedding with Nearest Neighbourhood Adjustment
 cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
 cargo install --path lupin      # Lexicon-Using Projection for Identity Naming (text, annotate, lineage, describe)
-cargo install --path cocoa      # COunterfactual COnfounder Adjustment
+cargo install cocoa-rs          # cocoa — COunterfactual COnfounder Adjustment
 cargo install mung-cnv          # mung — Malignancy Unmixing on Normalized Genomes with CNV estimation
 ```
 
