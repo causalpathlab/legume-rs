@@ -1,21 +1,29 @@
 # =============================================================================
 # Binaries (all from crates.io)
 # =============================================================================
-CRATES_BINS := senna lupin chickpea pinto cocoa mung data-beans data-beans-sim
-BINARIES    := $(CRATES_BINS)
+BINARIES := senna lupin chickpea pinto cocoa mung faba fqtl data-beans
 
-# $$bin -> pkg / extra_feat / from_crates  (must run inside a shell recipe)
+# $$bin -> pkg / extra_feat / supported (must run inside a shell recipe).
+# `supported` lists the backend/HDF5 features the crate actually has, so we
+# never pass e.g. `--features metal` to faba or `--features hdf5` to fqtl.
 resolve_bin = case $$bin in \
-	mung)           pkg=mung-cnv;     extra_feat=;   from_crates=1;; \
-	cocoa)          pkg=cocoa-rs;     extra_feat=;   from_crates=1;; \
-	pinto)          pkg=pinto-rs;     extra_feat=;   from_crates=1;; \
-	chickpea)       pkg=chickpea-rs;  extra_feat=;   from_crates=1;; \
-	senna)          pkg=senna-rs;     extra_feat=;   from_crates=1;; \
-	lupin)          pkg=lupin-rs;     extra_feat=;   from_crates=1;; \
-	data-beans)     pkg=data-beans;   extra_feat=;   from_crates=1;; \
-	data-beans-sim) pkg=data-beans;   extra_feat=sim; from_crates=1;; \
-	*)              pkg=$$bin;        extra_feat=;   from_crates=1;; \
+	senna)      pkg=senna-rs;    extra_feat=;    supported="cuda metal hdf5";; \
+	lupin)      pkg=lupin-rs;    extra_feat=;    supported="cuda metal hdf5";; \
+	chickpea)   pkg=chickpea-rs; extra_feat=;    supported="cuda metal hdf5";; \
+	pinto)      pkg=pinto-rs;    extra_feat=;    supported="cuda metal hdf5";; \
+	cocoa)      pkg=cocoa-rs;    extra_feat=;    supported="cuda metal hdf5";; \
+	mung)       pkg=mung-cnv;    extra_feat=;    supported="cuda metal hdf5";; \
+	faba)       pkg=faba;        extra_feat=;    supported="hdf5";; \
+	fqtl)       pkg=fqtl-rs;     extra_feat=;    supported="cuda metal";; \
+	data-beans) pkg=data-beans;  extra_feat=sim; supported="cuda metal hdf5";; \
+	*)          pkg=$$bin;       extra_feat=;    supported="";; \
 	esac
+
+# $$1 = requested features; sets $$feat to "--features a,b" (or empty),
+# keeping only those in $$supported plus $$extra_feat.
+pick_feats = feat=; for f in "$$@" $$extra_feat; do \
+	case " $$supported $$extra_feat " in *" $$f "*) feat="$$feat,$$f";; esac; \
+	done; feat=$${feat\#,}; [ -n "$$feat" ] && feat="--features $$feat"
 
 # =============================================================================
 # Backend / HDF5 / CUDA capability
@@ -106,11 +114,7 @@ ifeq ($(HDF5),on)
 FEATS += hdf5
 endif
 
-empty :=
-space := $(empty) $(empty)
-comma := ,
-CARGO_FEATURES := $(if $(strip $(FEATS)),--features $(subst $(space),$(comma),$(strip $(FEATS))))
-CARGO_FEATURES_CPU := $(if $(filter on,$(HDF5)),--features hdf5)
+CPU_FEATS := $(if $(filter on,$(HDF5)),hdf5)
 CUDA_CAP_HINT := $(if $(filter cuda,$(BACKEND)$(if $(CUDA_COMPUTE_CAP),x)), \
 	echo "  hint: pass CUDA_COMPUTE_CAP=<cap> (e.g. 86)";)
 
@@ -135,27 +139,25 @@ install-metal:
 
 _install:
 	@echo "Installing from crates.io (BACKEND=$(BACKEND) HDF5=$(HDF5))"
-	@ok=0; fail=0; \
+	@ok=0; failed=; \
 	for bin in $(BINARIES); do \
 		$(resolve_bin); \
-		feat="$(CARGO_FEATURES)"; \
-		if [ -n "$$extra_feat" ]; then \
-			if [ -n "$$feat" ]; then feat="$$feat,$$extra_feat"; else feat="--features $$extra_feat"; fi; \
-		fi; \
+		set -- $(FEATS); $(pick_feats); \
 		echo "==> $$bin ($$pkg) $$feat"; \
+		if cargo install --locked --force $$pkg $$feat; then \
+			ok=$$((ok+1)); continue; \
+		fi; \
+		set -- $(CPU_FEATS); $(pick_feats); \
+		echo "  retry CPU for $$bin $$feat"; \
+		$(CUDA_CAP_HINT) \
 		if cargo install --locked --force $$pkg $$feat; then \
 			ok=$$((ok+1)); \
 		else \
-			echo "  retry CPU for $$bin"; \
-			$(CUDA_CAP_HINT) \
-			if cargo install --locked --force $$pkg $(CARGO_FEATURES_CPU) $$( [ -n "$$extra_feat" ] && echo --features $$extra_feat ); then \
-				ok=$$((ok+1)); \
-			else \
-				fail=$$((fail+1)); \
-			fi; \
+			failed="$$failed $$bin"; \
 		fi; \
 	done; \
-	echo "done: $$ok ok, $$fail failed"
+	echo "done: $$ok ok"; \
+	if [ -n "$$failed" ]; then echo "failed:$$failed"; exit 1; fi
 
 uninstall:
 	@for bin in $(BINARIES); do \

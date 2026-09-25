@@ -17,8 +17,8 @@ keeps shared docs and a convenience `Makefile` that installs them.
 | `cocoa` | `cocoa-rs` | [cocoa-rs](https://github.com/causalpathlab/cocoa-rs) |
 | `mung` | `mung-cnv` | [mung-cnv](https://github.com/causalpathlab/mung-cnv) |
 | `faba` | `faba` | [faba](https://github.com/causalpathlab/faba) |
-| `fqtl` | `fqtl` | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
-| `data-beans` | `data-beans` | [data-beans](https://crates.io/crates/data-beans) |
+| `fqtl` | `fqtl-rs` | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
+| `data-beans`, `data-beans-sim` | `data-beans` | [data-beans](https://github.com/causalpathlab/data-beans) |
 
 Shared libraries: [`legume-numeric`](https://crates.io/crates/legume-numeric),
 [`legume-plot`](https://crates.io/crates/legume-plot),
@@ -49,12 +49,15 @@ cargo install chickpea-rs
 cargo install pinto-rs
 cargo install cocoa-rs
 cargo install mung-cnv
-cargo install data-beans
+cargo install faba
+cargo install fqtl-rs
+cargo install data-beans --features sim   # adds data-beans-sim
 ```
 
 `make install` picks a GPU backend (Metal on macOS, CUDA on Linux if `nvcc`
-is on `PATH`, else CPU) and turns on HDF5 when libhdf5 is found. See
-`make help`.
+is on `PATH`, else CPU) and turns on HDF5 when libhdf5 is found. Features a
+crate doesn't have are skipped, and a failed GPU build is retried on CPU.
+See `make help`.
 
 ### Backend selection
 
