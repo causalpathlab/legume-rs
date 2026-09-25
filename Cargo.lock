@@ -667,7 +667,7 @@ dependencies = [
  "clap",
  "colored",
  "data-beans",
- "legume-genomic-types 0.4.0",
+ "legume-genomic-types",
  "legume-graph-embedding",
  "legume-numeric",
  "log",
@@ -2986,23 +2986,9 @@ dependencies = [
 
 [[package]]
 name = "legume-genomic-types"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "dashmap",
- "legume-numeric",
- "log",
- "nalgebra",
- "rayon",
- "rustc-hash",
- "tempfile",
-]
-
-[[package]]
-name = "legume-genomic-types"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79c4f232b527c26be74665ac2508f96f17f50b0aa4bd5901cd47f95b3bb6959b"
+checksum = "10b0b2bb572239d169ad016c359680d10c2f24009b87a964fcb4c6ec87eabf91"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -3488,7 +3474,7 @@ dependencies = [
  "anyhow",
  "clap",
  "data-beans",
- "legume-genomic-types 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "legume-genomic-types",
  "legume-numeric",
  "log",
  "nalgebra",
@@ -4904,7 +4890,7 @@ dependencies = [
  "hsblock-rs",
  "indicatif 0.18.6",
  "legume-enrichment",
- "legume-genomic-types 0.4.0",
+ "legume-genomic-types",
  "legume-graph-embedding",
  "legume-numeric",
  "lineage",
