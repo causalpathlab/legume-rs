@@ -134,6 +134,11 @@ Default order of operations in `cocoa diff`. Stage 1 (steps 1 to 5) works on cel
    go to `{out}.stage1.parquet`, with a warning when more than a fifth of a topic's cells are
    dropped. (An earlier multilevel refine built pseudobulks within each individual; there the
    label-free baseline absorbed most of the exposure effect.)
+   Sign bins can still pool several cell states, and when exposure shifts their mix, composition
+   leaks into the effect. So cells then move between neighbouring pseudobulks (codes one bit
+   apart) under a Poisson model with a pseudobulk rate and an individual offset, for ten sweeps,
+   until each pseudobulk holds one cell state. The refinement is label-free and never leaves a
+   pseudobulk with fewer than `--min-individuals-per-pb` individuals.
 4. **Sufficient statistics.** Every cell's raw counts are summed per topic into its pseudobulk and
    its individual. No exposure labels are used, so stage 1 is computed once and shared by every
    permutation draw. (Earlier versions matched cells across exposures, first to build a

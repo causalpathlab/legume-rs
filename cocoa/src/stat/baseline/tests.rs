@@ -1,7 +1,7 @@
 //! Label-free stage-1 baseline on simulated pseudobulk tables.
 //!
 //! ```text
-//!   y(d,i,p) ~ Poisson( n(i,p) * mu(d,p) * Lambda(d,i) )
+//!   y(d,i,p) ~ Poisson( n(i,p) * mu(d,p) * omega(d,i) )
 //! ```
 //!
 //! Individuals are spread over pseudobulks unevenly; some pseudobulks hold a
@@ -37,7 +37,7 @@ fn simulate(n_genes: usize, n_indv: usize, n_pb: usize, seed: u64) -> Table {
         }
     });
     let mu = Mat::from_fn(n_genes, n_pb, |_, _| (0.8 * normal.sample(&mut rng)).exp());
-    let lambda = Mat::from_fn(n_genes, n_indv, |_, _| {
+    let omega = Mat::from_fn(n_genes, n_indv, |_, _| {
         (0.5 * normal.sample(&mut rng)).exp()
     });
     let mut y_dp = Mat::zeros(n_genes, n_pb);
@@ -45,7 +45,7 @@ fn simulate(n_genes: usize, n_indv: usize, n_pb: usize, seed: u64) -> Table {
     for d in 0..n_genes {
         for i in 0..n_indv {
             for p in 0..n_pb {
-                let rate = n_ip[(i, p)] * mu[(d, p)] * lambda[(d, i)];
+                let rate = n_ip[(i, p)] * mu[(d, p)] * omega[(d, i)];
                 if rate > 0.0 {
                     let y = Poisson::new(rate).unwrap().sample(&mut rng);
                     y_dp[(d, p)] += y;
