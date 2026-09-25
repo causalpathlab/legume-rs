@@ -213,6 +213,17 @@ pub struct DiffArgs {
                      Pseudobulks still poorly mixed after merging are dropped per topic."
     )]
     pb_merge_levels: usize,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Likelihood sweeps moving cells between pseudobulks (0 = none)",
+        long_help = "After binning, cells move between neighbouring pseudobulks under a\n\
+                     Poisson model with individual offsets, so each pseudobulk\n\
+                     holds one cell state. A move never leaves a pseudobulk with fewer\n\
+                     than --min-individuals-per-pb individuals. Exposure is not used."
+    )]
+    pb_refine_sweeps: usize,
 }
 
 /// Number of principal components: `auto` or a count.
@@ -355,6 +366,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         proj_dim: args.proj_dim,
         bits: partition_bits(data.sparse_data.num_columns(), n_indv_named, args.proj_dim),
         merge_levels: args.pb_merge_levels,
+        refine_sweeps: args.pb_refine_sweeps,
         min_individuals: args.min_individuals_per_pb,
         block_size: args.block_size,
     };
