@@ -14,7 +14,7 @@ jobs:
     name: make install (dry run)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # A stub `cargo` that prints its arguments, and fails any GPU build so the
       # CPU-retry path gets exercised too.
       - run: |
@@ -41,7 +41,7 @@ jobs:
     name: crates.io packages and features
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Every `pkg=... supported="..."` row in the Makefile must name a
       # published crate that has each listed feature.
       - run: |
