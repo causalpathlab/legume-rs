@@ -85,7 +85,6 @@ zip = "8"
 
 # Bioinformatics
 coitrees = "0.4"
-rust-htslib = "1.0"
 
 # Nearest neighbours / clustering
 instant-distance = "0.6"
