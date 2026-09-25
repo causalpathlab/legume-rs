@@ -73,6 +73,9 @@ struct TripletsOut {
 }
 
 /// `N(0, sd)` draw, or exactly zero when `sd` is zero.
+/// Seed tag offset for the per-individual cell streams.
+const CELL_SEED_TAG: u64 = 1 << 32;
+
 fn normal_or_zero(rng: &mut rand::rngs::StdRng, sd: f32) -> f32 {
     if sd > 0.0 {
         Normal::new(0.0, sd).expect("positive sd").sample(rng)
@@ -91,15 +94,18 @@ impl GlmSimulator {
     ///
     fn generate_individual_glm(&self) -> anyhow::Result<GlmOut> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.rseed);
+        // one stream per draw, all from `rseed`
+        let seed = |tag: u64| legume_numeric::matrix::rand_util::mix_seed(self.rseed, tag);
 
         // 1. Generate confounding factors
-        let confounder_nk = Mat::rnorm(self.n_indv, self.n_covar);
+        let confounder_nk = Mat::rnorm_seeded(self.n_indv, self.n_covar, seed(1));
 
         // 2. Generate multinomial exposure assignment (sample x gene)
         // x(i,c) ~ multinomial( sum w(i,k) * effect(k,c) + eps )
-        let effect_kc = Mat::rnorm(self.n_covar, self.n_exp_cat);
+        let effect_kc = Mat::rnorm_seeded(self.n_covar, self.n_exp_cat, seed(2));
 
-        let logits_nc = Mat::rnorm(self.n_indv, self.n_exp_cat) * (1. - self.pve_exposure)
+        let logits_nc = Mat::rnorm_seeded(self.n_indv, self.n_exp_cat, seed(3))
+            * (1. - self.pve_exposure)
             + (&confounder_nk * effect_kc).scale_columns() * self.pve_exposure;
 
         let assignment_n = sample_logits_each_row(logits_nc, &mut rng)?;
@@ -265,8 +271,18 @@ impl GlmSimulator {
             .enumerate()
             .filter_map(
                 |(indv, nn)| -> Option<(usize, usize, Vec<(u64, u64, f32)>)> {
-                    let mut rng = rand::rng();
-                    let rho_m = Mat::rgamma(1, nn, self.depth_gamma_hyperparam);
+                    // one stream per individual, so rayon's order does not matter
+                    let indv_seed = legume_numeric::matrix::rand_util::mix_seed(
+                        self.rseed,
+                        CELL_SEED_TAG + indv as u64,
+                    );
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(indv_seed);
+                    let rho_m = Mat::rgamma_seeded(
+                        1,
+                        nn,
+                        self.depth_gamma_hyperparam,
+                        indv_seed.wrapping_add(1),
+                    );
                     let mu_g = ln_mu_gn.column(indv).map(|x| x.exp()).clone();
                     let mut _triplets = Vec::with_capacity(nn * n_genes);
 
