@@ -32,8 +32,8 @@ cargo install data-beans
 cargo install faba
 cargo install mung-cnv
 cargo install cocoa-rs
+cargo install pinto-rs
 cargo install --path senna
-cargo install --path pinto
 ```
 
 ## Tools
@@ -59,7 +59,9 @@ Basic utility functions for processing sparse matrices from single-cell omics da
 **SENNA**: Stochastic data Embedding with Nearest Neighbourhood Adjustment - embedding and dimensionality reduction tools.
 
 ### pinto
-**PINTO**: Proximity-based Interaction Network analysis to dissect Tissue Organizations - spatial analysis and network tools for tissue organization.
+**PINTO**: Proximity-based Interaction Network analysis to dissect Tissue Organizations — lives in
+[`causalpathlab/pinto-rs`](https://github.com/causalpathlab/pinto-rs)
+(`cargo install pinto-rs`).
 
 ## Documentation
 

@@ -11,12 +11,17 @@
 - **cocoa** (COunterfactual COnfounder Adjustment) now lives in
   [`causalpathlab/cocoa-rs`](https://github.com/causalpathlab/cocoa-rs)
   (`cargo install cocoa-rs`).
+- **pinto** (Proximity-based Interaction Network for Tissue Organization) now lives in
+  [`causalpathlab/pinto-rs`](https://github.com/causalpathlab/pinto-rs)
+  (`cargo install pinto-rs`).
 - Shared libraries are published separately:
   [`legume-numeric`](https://crates.io/crates/legume-numeric),
   [`data-beans`](https://crates.io/crates/data-beans),
   [`hsblock-rs`](https://crates.io/crates/hsblock-rs),
   [`legume-genomic-types`](https://crates.io/crates/legume-genomic-types),
-  [`mung-cnv`](https://crates.io/crates/mung-cnv) (Rust lib `cnv`).
+  [`mung-cnv`](https://crates.io/crates/mung-cnv) (Rust lib `cnv`),
+  [`legume-enrichment`](https://crates.io/crates/legume-enrichment) (Rust lib `enrichment`),
+  [`legume-graph-embedding`](https://crates.io/crates/legume-graph-embedding) (Rust lib `graph_embedding_util`).
 
 ## Installation
 
@@ -41,7 +46,7 @@ cargo install data-beans             # Data Backend for Extraction And Neighbour
 cargo install data-beans --features sim  # data-beans-sim binary
 cargo install faba                   # Feature statistics Accumulator for Base-pair-level Analysis
 cargo install --path senna      # Stochastic data Embedding with Nearest Neighbourhood Adjustment
-cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
+cargo install pinto-rs          # pinto — Proximity-based Interaction Network for Tissue Organization
 cargo install --path lupin      # Lexicon-Using Projection for Identity Naming (text, annotate, lineage, describe)
 cargo install cocoa-rs          # cocoa — COunterfactual COnfounder Adjustment
 cargo install mung-cnv          # mung — Malignancy Unmixing on Normalized Genomes with CNV estimation
