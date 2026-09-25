@@ -1,5 +1,5 @@
 //! The `diff` command line carries no ablation switches for its own method:
-//! topic residualization, the multilevel pseudobulk refine, and raw counts
+//! topic residualization, the likelihood pseudobulk refine, and raw counts
 //! into the model are the method, not options.
 
 use super::*;
@@ -27,6 +27,7 @@ fn required_arguments_parse() {
 fn removed_switches_are_rejected() {
     for flag in [
         "--no-refine",
+        "--pb-refine-sweeps",
         "--no-residualize-topics",
         "--no-adjust-housekeeping",
     ] {

@@ -3,22 +3,22 @@
 //! Per topic and gene, the pseudobulk table is fit by a rank-1 Poisson model
 //!
 //! ```text
-//!   y(i, p) ~ Poisson( n(i, p) * mu(p) * Lambda(i) )
+//!   y(i, p) ~ Poisson( n(i, p) * mu(p) * omega(i) )
 //! ```
 //!
-//! with `mu(p)` the cell-state rate of pseudobulk `p` and `Lambda(i)` a free
+//! with `mu(p)` the cell-state rate of pseudobulk `p` and `omega(i)` a free
 //! multiplier per individual. It uses no exposure labels, so it is computed
 //! once and shared by every permutation draw. Pseudobulks pool individuals,
-//! so the individual x pseudobulk table identifies `mu` and `Lambda` up to one
+//! so the individual x pseudobulk table identifies `mu` and `omega` up to one
 //! scale per gene, which cancels in every reported effect. The fit
 //! alternates the two closed-form updates
 //!
 //! ```text
-//!   mu(p)     = (y(., p) + a0) / (sum_i Lambda(i) n(i, p) + b0)
-//!   Lambda(i) = (y(i, .) + a0) / (sum_p mu(p) n(i, p) + b0)
+//!   mu(p)     = (y(., p) + a0) / (sum_i omega(i) n(i, p) + b0)
+//!   omega(i)  = (y(i, .) + a0) / (sum_p mu(p) n(i, p) + b0)
 //! ```
 //!
-//! (Gamma(a0, b0) pseudo-counts keep sparse genes finite), with `Lambda`
+//! (Gamma(a0, b0) pseudo-counts keep sparse genes finite), with `omega`
 //! rescaled to mean one per gene after every sweep. Stage 2 takes the offset
 //! `m(i) = sum_p mu(p) n(i, p)`.
 
@@ -55,23 +55,23 @@ impl CocoaStat {
         let (n_genes, n_indv) = y_di.shape();
         let (a0, b0) = (self.a0, self.b0);
 
-        let mut lambda = Mat::from_element(n_genes, n_indv, 1.0);
+        let mut omega = Mat::from_element(n_genes, n_indv, 1.0);
         let mut mu = Mat::zeros(n_genes, n_ip.ncols());
         let mut m = Mat::zeros(n_genes, n_indv);
         let mut prev = Mat::from_element(n_genes, n_indv, f32::INFINITY);
         for _ in 0..self.n_opt_iter {
-            // mu(d,p) = (y(d,p) + a0) / (sum_i Lambda(d,i) n(i,p) + b0)
-            lambda.mul_to(n_ip, &mut mu);
+            // mu(d,p) = (y(d,p) + a0) / (sum_i omega(d,i) n(i,p) + b0)
+            omega.mul_to(n_ip, &mut mu);
             mu.zip_apply(y_dp, |den, y| *den = (y + a0) / (*den + b0));
-            // m(d,i) = sum_p mu(d,p) n(i,p);  Lambda = (y(d,i) + a0) / (m + b0)
+            // m(d,i) = sum_p mu(d,p) n(i,p);  omega = (y(d,i) + a0) / (m + b0)
             mu.mul_to(&n_pi, &mut m);
-            lambda.copy_from(y_di);
-            lambda.zip_apply(&m, |l, den| *l = (*l + a0) / (den + b0));
-            // fix the gene scale: Lambda has mean one per gene
+            omega.copy_from(y_di);
+            omega.zip_apply(&m, |w, den| *w = (*w + a0) / (den + b0));
+            // fix the gene scale: omega has mean one per gene
             for d in 0..n_genes {
-                let s = lambda.row(d).mean();
+                let s = omega.row(d).mean();
                 if s > 0.0 {
-                    lambda.row_mut(d).scale_mut(1.0 / s);
+                    omega.row_mut(d).scale_mut(1.0 / s);
                     mu.row_mut(d).scale_mut(s);
                     m.row_mut(d).scale_mut(s);
                 }
