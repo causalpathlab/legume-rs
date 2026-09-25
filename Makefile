@@ -1,20 +1,20 @@
 # =============================================================================
-# Binaries
+# Binaries (all from crates.io)
 # =============================================================================
-# PATH_BINS: built from this workspace.
-# CRATES_BINS: cargo install from crates.io (see resolve_bin).
-PATH_BINS   := senna chickpea gene-text lupin
-CRATES_BINS := pinto cocoa mung data-beans data-beans-sim
-BINARIES    := $(PATH_BINS) $(CRATES_BINS)
+CRATES_BINS := senna lupin chickpea pinto cocoa mung data-beans data-beans-sim
+BINARIES    := $(CRATES_BINS)
 
 # $$bin -> pkg / extra_feat / from_crates  (must run inside a shell recipe)
 resolve_bin = case $$bin in \
-	mung)           pkg=mung-cnv;   extra_feat=;   from_crates=1;; \
-	cocoa)          pkg=cocoa-rs;   extra_feat=;   from_crates=1;; \
-	pinto)          pkg=pinto-rs;   extra_feat=;   from_crates=1;; \
-	data-beans)     pkg=data-beans; extra_feat=;   from_crates=1;; \
-	data-beans-sim) pkg=data-beans; extra_feat=sim; from_crates=1;; \
-	*)              pkg=$$bin;      extra_feat=;   from_crates=;; \
+	mung)           pkg=mung-cnv;     extra_feat=;   from_crates=1;; \
+	cocoa)          pkg=cocoa-rs;     extra_feat=;   from_crates=1;; \
+	pinto)          pkg=pinto-rs;     extra_feat=;   from_crates=1;; \
+	chickpea)       pkg=chickpea-rs;  extra_feat=;   from_crates=1;; \
+	senna)          pkg=senna-rs;     extra_feat=;   from_crates=1;; \
+	lupin)          pkg=lupin-rs;     extra_feat=;   from_crates=1;; \
+	data-beans)     pkg=data-beans;   extra_feat=;   from_crates=1;; \
+	data-beans-sim) pkg=data-beans;   extra_feat=sim; from_crates=1;; \
+	*)              pkg=$$bin;        extra_feat=;   from_crates=1;; \
 	esac
 
 # =============================================================================
@@ -62,7 +62,6 @@ ifeq (,$(filter $(HDF5),on off))
 $(error Unknown HDF5='$(HDF5)'; use on or off)
 endif
 
-# CUDA_COMPUTE_CAP: caller > nvidia-smi > cache > /proc GPU model
 CUDA_CAP_CACHE := $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/legume-rs/cuda-compute-cap
 cuda_cap_from_model = $(strip \
 	$(if $(or $(findstring RTX 50,$(1)),$(findstring Blackwell,$(1))),120, \
@@ -99,9 +98,6 @@ export CUDA_COMPUTE_CAP
 endif
 endif
 
-# =============================================================================
-# Cargo --features
-# =============================================================================
 FEATS :=
 ifneq ($(BACKEND),cpu)
 FEATS += $(BACKEND)
@@ -118,95 +114,52 @@ CARGO_FEATURES_CPU := $(if $(filter on,$(HDF5)),--features hdf5)
 CUDA_CAP_HINT := $(if $(filter cuda,$(BACKEND)$(if $(CUDA_COMPUTE_CAP),x)), \
 	echo "  hint: pass CUDA_COMPUTE_CAP=<cap> (e.g. 86)";)
 
-INSTALL_STATUS := $(CURDIR)/.make-install-status
-
-# =============================================================================
-# Targets
-# =============================================================================
-.PHONY: all help install install-cpu install-cuda install-metal \
-	$(addprefix install-,$(BINARIES)) \
-	uninstall $(addprefix uninstall-,$(BINARIES)) \
-	build build-cuda build-metal test clean \
-	_status_init _status_report
-
-all: install
+.PHONY: help install install-cpu install-cuda install-metal uninstall
 
 help:
-	@echo "backend=$(DEFAULT_BACKEND)  hdf5=$(DEFAULT_HDF5)$(if $(HDF5_DETECTED_DIR), dir=$(HDF5_DETECTED_DIR))"
-ifeq ($(BACKEND),cuda)
-	@echo "cuda_cap=$(or $(CUDA_COMPUTE_CAP),none) ($(CUDA_CAP_SOURCE))"
-endif
-	@echo "bins: $(BINARIES)"
-	@echo "targets: install[-cpu|-cuda|-metal|-<bin>]  uninstall[-<bin>]  build  test  clean"
-	@echo "vars: BACKEND=  HDF5=  HDF5_DIR=  CUDA_COMPUTE_CAP="
+	@echo "legume-rs meta installer (crates.io only)"
+	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off]"
+	@echo "  make uninstall"
+	@echo "Binaries: $(BINARIES)"
 
-install: _status_init $(addprefix install-,$(BINARIES)) _status_report
-install-cpu:  ; @$(MAKE) install BACKEND=cpu
-install-cuda: ; @$(MAKE) install BACKEND=cuda
-install-metal:; @$(MAKE) install BACKEND=metal
+install: install-$(BACKEND)
 
-_status_init:
-	@rm -f $(INSTALL_STATUS)
-ifeq ($(BACKEND),cuda)
-	@echo "CUDA compute capability: $(or $(CUDA_COMPUTE_CAP),none) ($(CUDA_CAP_SOURCE))"
-endif
+install-cpu:
+	@$(MAKE) _install BACKEND=cpu
 
-_status_report:
-	@echo ""; echo "Install summary (backend=$(BACKEND) hdf5=$(HDF5)):"
-	@if [ -f $(INSTALL_STATUS) ]; then \
-		awk '{ printf "  %-18s -> %s\n", $$1, $$2 }' $(INSTALL_STATUS); \
-		if grep -q ' cpu$$' $(INSTALL_STATUS) && [ "$(BACKEND)" != cpu ]; then \
-			echo "  (some binaries fell back to CPU)"; \
-		fi; \
-	fi
-	@rm -f $(INSTALL_STATUS)
+install-cuda:
+	@$(MAKE) _install BACKEND=cuda
 
-$(addprefix install-,$(BINARIES)):
-	@bin=$(@:install-%=%); $(resolve_bin); \
-	feats="$(CARGO_FEATURES)"; feats_cpu="$(CARGO_FEATURES_CPU)"; \
-	if [ -n "$$extra_feat" ]; then \
-		if [ -n "$$feats" ]; then feats="$$feats,$$extra_feat"; else feats="--features $$extra_feat"; fi; \
-		if [ -n "$$feats_cpu" ]; then feats_cpu="$$feats_cpu,$$extra_feat"; else feats_cpu="--features $$extra_feat"; fi; \
-	fi; \
-	if [ -n "$$from_crates" ]; then cmd="cargo install --locked --force $$pkg"; \
-	else cmd="cargo install --locked --path $$pkg"; fi; \
-	if [ -n "$$feats" ]; then \
-		echo "Installing $$bin ($(BACKEND))..."; \
-		if $$cmd $$feats; then echo "$$bin $(BACKEND)" >> $(INSTALL_STATUS); \
-		else \
-			echo "  $(BACKEND) failed for $$bin; retrying CPU"; $(CUDA_CAP_HINT) \
-			$$cmd $$feats_cpu; echo "$$bin cpu" >> $(INSTALL_STATUS); \
-		fi; \
-	else \
-		echo "Installing $$bin (cpu)..."; \
-		$$cmd $$feats_cpu; echo "$$bin cpu" >> $(INSTALL_STATUS); \
-	fi
+install-metal:
+	@$(MAKE) _install BACKEND=metal
 
-uninstall: $(addprefix uninstall-,$(BINARIES))
-	@echo "done"
-
-$(addprefix uninstall-,$(BINARIES)):
-	@bin=$(@:uninstall-%=%); $(resolve_bin); \
-	echo "Uninstalling $$bin..."; \
-	cargo uninstall $$pkg --bin $$bin 2>/dev/null || rm -f "$$HOME/.cargo/bin/$$bin" || true
-
-build:
-ifeq ($(BACKEND),cuda)
-	@echo "CUDA compute capability: $(or $(CUDA_COMPUTE_CAP),none) ($(CUDA_CAP_SOURCE))"
-endif
-	@for bin in $(PATH_BINS); do \
+_install:
+	@echo "Installing from crates.io (BACKEND=$(BACKEND) HDF5=$(HDF5))"
+	@ok=0; fail=0; \
+	for bin in $(BINARIES); do \
 		$(resolve_bin); \
-		echo "Building $$bin ($(BACKEND))..."; \
-		if [ -n "$(CARGO_FEATURES)" ]; then \
-			cargo build --release -p $$pkg $(CARGO_FEATURES) \
-			|| { echo "  $(BACKEND) failed; retrying CPU"; $(CUDA_CAP_HINT) \
-			     cargo build --release -p $$pkg $(CARGO_FEATURES_CPU) || exit $$?; }; \
-		else \
-			cargo build --release -p $$pkg $(CARGO_FEATURES_CPU) || exit $$?; \
+		feat="$(CARGO_FEATURES)"; \
+		if [ -n "$$extra_feat" ]; then \
+			if [ -n "$$feat" ]; then feat="$$feat,$$extra_feat"; else feat="--features $$extra_feat"; fi; \
 		fi; \
-	done
+		echo "==> $$bin ($$pkg) $$feat"; \
+		if cargo install --locked --force $$pkg $$feat; then \
+			ok=$$((ok+1)); \
+		else \
+			echo "  retry CPU for $$bin"; \
+			$(CUDA_CAP_HINT) \
+			if cargo install --locked --force $$pkg $(CARGO_FEATURES_CPU) $$( [ -n "$$extra_feat" ] && echo --features $$extra_feat ); then \
+				ok=$$((ok+1)); \
+			else \
+				fail=$$((fail+1)); \
+			fi; \
+		fi; \
+	done; \
+	echo "done: $$ok ok, $$fail failed"
 
-build-cuda:  ; @$(MAKE) build BACKEND=cuda
-build-metal: ; @$(MAKE) build BACKEND=metal
-test:        ; cargo test --workspace
-clean:       ; cargo clean; rm -f $(INSTALL_STATUS)
+uninstall:
+	@for bin in $(BINARIES); do \
+		$(resolve_bin); \
+		echo "cargo uninstall $$pkg"; \
+		cargo uninstall $$pkg 2>/dev/null || true; \
+	done
