@@ -1,5 +1,5 @@
 //! The `diff` command line carries no ablation switches for its own method:
-//! topic residualization, the multilevel pseudobulk refine, and raw counts
+//! topic residualization, the likelihood pseudobulk refine, and raw counts
 //! into the model are the method, not options.
 
 use super::*;

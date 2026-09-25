@@ -60,7 +60,7 @@ enum Commands {
                       \n\
                       Pipeline (default):\n  \
                       (1) residualize soft topic weights vs exposure (collider; soft -r needed),\n  \
-                      (2) multilevel refine of the pseudobulk partition (no exposure strata),\n  \
+                      (2) likelihood refine of the pseudobulk partition (no exposure labels),\n  \
                       (3) CoCoA matching across exposure on raw counts,\n  \
                       (4) group model: tau = average exposure effect (gene x group),\n  \
                       \x20   delta = individual effect without exposure (random effect).\n\
