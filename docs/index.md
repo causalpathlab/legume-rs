@@ -16,31 +16,24 @@ install and backend notes.
 ## Quick install
 
 ```sh
-# from a clone of this repo (path + crates.io binaries):
+# from a clone of this repo (installs everything from crates.io):
 make install
 
 # or pick packages:
-cargo install data-beans faba mung-cnv cocoa-rs pinto-rs
-cargo install --path senna
-cargo install --path lupin
-cargo install --path chickpea
-cargo install --path gene-text
+cargo install senna-rs lupin-rs chickpea-rs pinto-rs cocoa-rs mung-cnv faba fqtl-rs
+cargo install data-beans --features sim
 ```
 
-## Tools in this repo
-
-- **senna** — stochastic embedding with nearest-neighbourhood adjustment
-- **lupin** — text, annotate, lineage, describe
-- **chickpea** — peak-to-gene / multiome workflows
-- **gene-text** — gene-text utilities
-
-## Extracted tools
+## Tools
 
 | Binary | Install | Repo |
 | --- | --- | --- |
-| `data-beans` | `cargo install data-beans` | crates.io |
-| `faba` | `cargo install faba` | [faba](https://github.com/causalpathlab/faba) |
-| `mung` | `cargo install mung-cnv` | [mung-cnv](https://github.com/causalpathlab/mung-cnv) |
-| `cocoa` | `cargo install cocoa-rs` | [cocoa-rs](https://github.com/causalpathlab/cocoa-rs) |
+| `senna` | `cargo install senna-rs` | [senna-rs](https://github.com/causalpathlab/senna-rs) |
+| `lupin` | `cargo install lupin-rs` | [lupin-rs](https://github.com/causalpathlab/lupin-rs) |
+| `chickpea` | `cargo install chickpea-rs` | [chickpea-rs](https://github.com/causalpathlab/chickpea-rs) |
 | `pinto` | `cargo install pinto-rs` | [pinto-rs](https://github.com/causalpathlab/pinto-rs) |
-| `fqtl` | see repo | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
+| `cocoa` | `cargo install cocoa-rs` | [cocoa-rs](https://github.com/causalpathlab/cocoa-rs) |
+| `mung` | `cargo install mung-cnv` | [mung-cnv](https://github.com/causalpathlab/mung-cnv) |
+| `faba` | `cargo install faba` | [faba](https://github.com/causalpathlab/faba) |
+| `fqtl` | `cargo install fqtl-rs` | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
+| `data-beans` | `cargo install data-beans --features sim` | [data-beans](https://github.com/causalpathlab/data-beans) |
