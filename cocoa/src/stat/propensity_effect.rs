@@ -270,9 +270,9 @@ fn fit_gamma_block(omega: &Mat, design: &Mat, proj: &Mat64) -> (Mat, usize) {
     let mut iterations = 0;
     for it in 0..MAX_ITER {
         iterations = it + 1;
-        for (zv, (&ev, &lv)) in z.iter_mut().zip(eta.iter().zip(omega.iter())) {
+        for (zv, (&ev, &wv)) in z.iter_mut().zip(eta.iter().zip(omega.iter())) {
             let ev = ev.clamp(-60.0, 60.0);
-            *zv = ev + lv * (-ev).exp() - 1.0;
+            *zv = ev + wv * (-ev).exp() - 1.0;
         }
         let mut step = &z * &proj_t - &beta;
         let mut deta = &step * &design_t;

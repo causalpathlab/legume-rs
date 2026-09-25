@@ -66,7 +66,7 @@ impl CocoaStat {
             // m(d,i) = sum_p mu(d,p) n(i,p);  omega = (y(d,i) + a0) / (m + b0)
             mu.mul_to(&n_pi, &mut m);
             omega.copy_from(y_di);
-            omega.zip_apply(&m, |l, den| *l = (*l + a0) / (den + b0));
+            omega.zip_apply(&m, |w, den| *w = (*w + a0) / (den + b0));
             // fix the gene scale: omega has mean one per gene
             for d in 0..n_genes {
                 let s = omega.row(d).mean();

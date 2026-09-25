@@ -55,21 +55,20 @@ enum Commands {
     #[command(
         about = "Differential expression analysis with pseudobulk",
         long_about = "Differential expression on pseudobulk data, confounder-adjusted.\n\
-                      Adjustment is by cross-condition and cross-exposure matching,\n\
-                      after Park & Kellis, 2021.\n\
                       \n\
-                      Pipeline (default):\n  \
+                      Pipeline:\n  \
                       (1) residualize soft topic weights vs exposure (collider; soft -r needed),\n  \
-                      (2) likelihood refine of the pseudobulk partition (no exposure labels),\n  \
-                      (3) CoCoA matching across exposure on raw counts,\n  \
-                      (4) group model: tau = average exposure effect (gene x group),\n  \
-                      \x20   delta = individual effect without exposure (random effect).\n\
-                      Writes {out}.effect, .delta, .contrast and, with\n\
-                      --n-permutations, .perm (label-permutation z, p).\n\
+                      (2) label-free pseudobulks across individuals, refined by likelihood,\n  \
+                      (3) stage 1: rank-1 baseline mu(p) * omega(i) per gene and topic,\n  \
+                      (4) stage 2: doubly robust g-estimation of the exposure effect,\n  \
+                      \x20   a Gamma GLM on omega with the propensity as covariate.\n\
+                      Writes {out}.effect, .delta, .contrast, .stage1 and, with\n\
+                      --n-permutations, .perm (conditional-permutation z, p).\n\
                       \n\
                       References:\n  \
-                      Park & Kellis (2021) Genome Biol — CoCoA-diff framework\n  \
-                      Hartwig et al. (2023) Eur J Epidemiol — residual collider stratification"
+                      Park & Kellis (2021) Genome Biol: CoCoA-diff framework\n  \
+                      Dukes & Vansteelandt (2018) Am J Epidemiol: g-estimation of risk ratios\n  \
+                      Hartwig et al. (2023) Eur J Epidemiol: residual collider stratification"
     )]
     Diff(DiffArgs),
 
