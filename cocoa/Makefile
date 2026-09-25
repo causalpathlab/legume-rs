@@ -1,9 +1,8 @@
-# Simulation harnesses for the group model's trended dispersion.
+# Simulation harness.
 #
-#   make sim-recovery      recover a planted dispersion trend end to end
 #   make sim-calibration   permutation null rate on a confounded null
 #
-# Both write under $(OUT); numbers are printed, not stored in the repo.
+# Writes under $(OUT); numbers are printed, not stored in the repo.
 # Needs the release binary and R with the arrow package.
 
 BIN ?= ../target/release/cocoa
@@ -14,29 +13,18 @@ SIM_ARGS ?= -r 1000 -c 6000 -a 0 -n 2 --n-samples-per-exposure 8 --n-covariates 
 N_PERM ?= 100
 R_PRELUDE = suppressMessages(library(arrow))
 
-.PHONY: sim-recovery sim-calibration
+.PHONY: sim-calibration
 
 $(OUT):
 	mkdir -p $(OUT)
 
 # Simulate, fabricate a single-topic file, run diff. Per-target variables
-# supply what differs between the two checks.
+# supply the check's settings.
 $(OUT)/%.diff.contrast.parquet: | $(OUT)
 	$(BIN) simulate-one $(SIM_ARGS) $(SIM_EXTRA) -o $(OUT)/$*
 	gunzip -c $(OUT)/$*.samples.gz | sed 's/.*/0/' > $(OUT)/$*.topic.txt
 	$(BIN) diff $(OUT)/$*.zarr.zip -i $(OUT)/$*.samples.gz -e $(OUT)/$*.exposures.gz \
 	    -t $(OUT)/$*.topic.txt $(DIFF_EXTRA) -o $(OUT)/$*.diff
-
-# No individual-level covariate effect: the group model has no term for it,
-# so it would land in phi and blur the planted trend.
-sim-recovery: SIM_EXTRA = --pve-covar-gene 0
-sim-recovery: $(OUT)/recov.diff.contrast.parquet
-	Rscript -e '$(R_PRELUDE); \
-	  a <- as.data.frame(read_parquet("$(OUT)/recov.diff.contrast.parquet")); \
-	  t <- read.table("$(OUT)/recov.dispersion.tsv.gz", header = TRUE); \
-	  t <- t[match(as.integer(a$$gene), t$$gene), ]; \
-	  cat(sprintf("pearson(log phi_hat, log phi_true) = %.3f  rmse = %.3f\n", \
-	    cor(log(a$$dispersion), log(t$$phi)), sqrt(mean((log(a$$dispersion) - log(t$$phi))^2))))'
 
 # Confounded null (the individual covariate drives both exposure and
 # expression); the fraction of genes below 0.05 should sit near the nominal rate.
