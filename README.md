@@ -25,14 +25,11 @@ Shared libraries: [`legume-numeric`](https://crates.io/crates/legume-numeric),
 [`legume-genomic-types`](https://crates.io/crates/legume-genomic-types),
 [`legume-enrichment`](https://crates.io/crates/legume-enrichment),
 [`legume-graph-embedding`](https://crates.io/crates/legume-graph-embedding),
-[`legume-annotate`](https://crates.io/crates/legume-annotate),
-[`legume-lineage`](https://crates.io/crates/legume-lineage),
-[`legume-gene-text`](https://crates.io/crates/legume-gene-text),
 [`hsblock-rs`](https://crates.io/crates/hsblock-rs).
 
 **Ownership:** `senna` = train / embed / predict / cluster / layout.
 `lupin` = subsequent analysis (annotate, lineage, pseudotime, describe, plots,
-`text-qc` / `word-graph`). There is no separate `gene-text` binary.
+`text-qc` / `word-graph`) — all in one package, not separate crates.
 
 ## Installation
 
