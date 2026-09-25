@@ -37,7 +37,6 @@ ctrlc = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }
 nalgebra = { workspace = true }
-nalgebra-sparse = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 rayon = { workspace = true }
