@@ -1,11 +1,11 @@
 # =============================================================================
 # Binaries (all from crates.io)
 # =============================================================================
-BINARIES := senna lupin chickpea pinto cocoa mung faba fqtl data-beans
+BINARIES := senna lupin chickpea pinto cocoa mung faba data-beans
 
 # $$bin -> pkg / extra_feat / supported (must run inside a shell recipe).
 # `supported` lists the backend/HDF5 features the crate actually has, so we
-# never pass e.g. `--features metal` to faba or `--features hdf5` to fqtl.
+# never pass e.g. `--features metal` to faba or data-beans.
 resolve_bin = case $$bin in \
 	senna)      pkg=senna-rs;    extra_feat=;    supported="cuda metal hdf5";; \
 	lupin)      pkg=lupin-rs;    extra_feat=;    supported="cuda metal hdf5";; \
@@ -14,7 +14,6 @@ resolve_bin = case $$bin in \
 	cocoa)      pkg=cocoa-rs;    extra_feat=;    supported="cuda metal hdf5";; \
 	mung)       pkg=mung-cnv;    extra_feat=;    supported="cuda metal hdf5";; \
 	faba)       pkg=faba;        extra_feat=;    supported="hdf5";; \
-	fqtl)       pkg=fqtl-rs;     extra_feat=;    supported="cuda metal";; \
 	data-beans) pkg=data-beans;  extra_feat=sim; supported="hdf5";; \
 	*)          pkg=$$bin;       extra_feat=;    supported="";; \
 	esac
