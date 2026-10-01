@@ -144,13 +144,13 @@ _install:
 		$(resolve_bin); \
 		set -- $(FEATS); $(pick_feats); \
 		echo "==> $$bin ($$pkg) $$feat"; \
-		if cargo install --locked --force $$pkg $$feat; then \
+		if cargo install --force $$pkg $$feat; then \
 			ok=$$((ok+1)); continue; \
 		fi; \
 		set -- $(CPU_FEATS); $(pick_feats); \
 		echo "  retry CPU for $$bin $$feat"; \
 		$(CUDA_CAP_HINT) \
-		if cargo install --locked --force $$pkg $$feat; then \
+		if cargo install --force $$pkg $$feat; then \
 			ok=$$((ok+1)); \
 		else \
 			failed="$$failed $$bin"; \
