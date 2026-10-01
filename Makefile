@@ -15,7 +15,7 @@ resolve_bin = case $$bin in \
 	mung)       pkg=mung-cnv;    extra_feat=;    supported="cuda metal hdf5";; \
 	faba)       pkg=faba;        extra_feat=;    supported="hdf5";; \
 	fqtl)       pkg=fqtl-rs;     extra_feat=;    supported="cuda metal";; \
-	data-beans) pkg=data-beans;  extra_feat=sim; supported="cuda metal hdf5";; \
+	data-beans) pkg=data-beans;  extra_feat=sim; supported="hdf5";; \
 	*)          pkg=$$bin;       extra_feat=;    supported="";; \
 	esac
 
