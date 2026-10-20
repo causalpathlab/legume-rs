@@ -76,18 +76,6 @@ make install HDF5=off
 HDF5_DIR=/path/to/hdf5 make install
 ```
 
-### Newest features, before a release
-
-`SOURCE=git` builds each tool from its GitHub `main` instead of crates.io.
-Use it for features merged but not yet released (for example the `mcp`
-servers):
-
-```sh
-make install SOURCE=git
-make install SOURCE=git BRANCH=some-branch   # one branch, in every repo
-make install SOURCE=git BINARIES="pinto lupin"   # just these
-```
-
 ### Agents (MCP)
 
 Tools with an `mcp` subcommand serve an agent over the Model Context

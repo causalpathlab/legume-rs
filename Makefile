@@ -1,5 +1,5 @@
 # =============================================================================
-# Binaries (from crates.io, or each repo's GitHub main with SOURCE=git)
+# Binaries (all from crates.io)
 # =============================================================================
 BINARIES := senna lupin chickpea pinto cocoa mung faba data-beans
 
@@ -62,21 +62,6 @@ export HDF5_DIR := $(HDF5_DETECTED_DIR)
 endif
 endif
 
-# Where the crates come from: crates.io releases, or the newest merged work
-# on GitHub (each repo's main, or BRANCH=<name>) before it is released.
-SOURCE ?= crates
-BRANCH ?=
-GITHUB := https://github.com/causalpathlab
-
-ifeq (,$(filter $(SOURCE),crates git))
-$(error Unknown SOURCE='$(SOURCE)'; use crates or git)
-endif
-ifeq ($(SOURCE),git)
-from = --git $(GITHUB)/$$pkg $(if $(BRANCH),--branch $(BRANCH)) $$pkg
-else
-from = $$pkg
-endif
-
 ifeq (,$(filter $(BACKEND),cpu cuda metal))
 $(error Unknown BACKEND='$(BACKEND)'; use cpu, cuda, or metal)
 endif
@@ -135,9 +120,8 @@ CUDA_CAP_HINT := $(if $(filter cuda,$(BACKEND)$(if $(CUDA_COMPUTE_CAP),x)), \
 .PHONY: help install install-cpu install-cuda install-metal uninstall mcp mcp-remove
 
 help:
-	@echo "legume-rs meta installer"
-	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off] [SOURCE=crates|git] [BRANCH=name]"
-	@echo "      SOURCE=git builds each repo's GitHub main (or BRANCH): features not yet released"
+	@echo "legume-rs meta installer (crates.io only)"
+	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off]"
 	@echo "  make mcp           register every installed tool with an \`mcp\` server in Claude Code"
 	@echo "  make mcp-remove    unregister them"
 	@echo "  make uninstall"
@@ -155,19 +139,19 @@ install-metal:
 	@$(MAKE) _install BACKEND=metal
 
 _install:
-	@echo "Installing from $(if $(filter git,$(SOURCE)),GitHub $(or $(BRANCH),main),crates.io) (BACKEND=$(BACKEND) HDF5=$(HDF5))"
+	@echo "Installing from crates.io (BACKEND=$(BACKEND) HDF5=$(HDF5))"
 	@ok=0; failed=; \
 	for bin in $(BINARIES); do \
 		$(resolve_bin); \
 		set -- $(FEATS); $(pick_feats); \
 		echo "==> $$bin ($$pkg) $$feat"; \
-		if cargo install --force $(from) $$feat; then \
+		if cargo install --force $$pkg $$feat; then \
 			ok=$$((ok+1)); continue; \
 		fi; \
 		set -- $(CPU_FEATS); $(pick_feats); \
 		echo "  retry CPU for $$bin $$feat"; \
 		$(CUDA_CAP_HINT) \
-		if cargo install --force $(from) $$feat; then \
+		if cargo install --force $$pkg $$feat; then \
 			ok=$$((ok+1)); \
 		else \
 			failed="$$failed $$bin"; \
