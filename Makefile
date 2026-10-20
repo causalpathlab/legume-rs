@@ -1,5 +1,5 @@
 # =============================================================================
-# Binaries (all from crates.io)
+# Binaries (from crates.io, or each repo's GitHub main with SOURCE=git)
 # =============================================================================
 BINARIES := senna lupin chickpea pinto cocoa mung faba data-beans
 
@@ -62,6 +62,21 @@ export HDF5_DIR := $(HDF5_DETECTED_DIR)
 endif
 endif
 
+# Where the crates come from: crates.io releases, or the newest merged work
+# on GitHub (each repo's main, or BRANCH=<name>) before it is released.
+SOURCE ?= crates
+BRANCH ?=
+GITHUB := https://github.com/causalpathlab
+
+ifeq (,$(filter $(SOURCE),crates git))
+$(error Unknown SOURCE='$(SOURCE)'; use crates or git)
+endif
+ifeq ($(SOURCE),git)
+from = --git $(GITHUB)/$$pkg $(if $(BRANCH),--branch $(BRANCH)) $$pkg
+else
+from = $$pkg
+endif
+
 ifeq (,$(filter $(BACKEND),cpu cuda metal))
 $(error Unknown BACKEND='$(BACKEND)'; use cpu, cuda, or metal)
 endif
@@ -117,11 +132,14 @@ CPU_FEATS := $(if $(filter on,$(HDF5)),hdf5)
 CUDA_CAP_HINT := $(if $(filter cuda,$(BACKEND)$(if $(CUDA_COMPUTE_CAP),x)), \
 	echo "  hint: pass CUDA_COMPUTE_CAP=<cap> (e.g. 86)";)
 
-.PHONY: help install install-cpu install-cuda install-metal uninstall
+.PHONY: help install install-cpu install-cuda install-metal uninstall mcp mcp-remove
 
 help:
-	@echo "legume-rs meta installer (crates.io only)"
-	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off]"
+	@echo "legume-rs meta installer"
+	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off] [SOURCE=crates|git] [BRANCH=name]"
+	@echo "      SOURCE=git builds each repo's GitHub main (or BRANCH): features not yet released"
+	@echo "  make mcp           register every installed tool with an \`mcp\` server in Claude Code"
+	@echo "  make mcp-remove    unregister them"
 	@echo "  make uninstall"
 	@echo "Binaries: $(BINARIES)"
 
@@ -137,19 +155,19 @@ install-metal:
 	@$(MAKE) _install BACKEND=metal
 
 _install:
-	@echo "Installing from crates.io (BACKEND=$(BACKEND) HDF5=$(HDF5))"
+	@echo "Installing from $(if $(filter git,$(SOURCE)),GitHub $(or $(BRANCH),main),crates.io) (BACKEND=$(BACKEND) HDF5=$(HDF5))"
 	@ok=0; failed=; \
 	for bin in $(BINARIES); do \
 		$(resolve_bin); \
 		set -- $(FEATS); $(pick_feats); \
 		echo "==> $$bin ($$pkg) $$feat"; \
-		if cargo install --force $$pkg $$feat; then \
+		if cargo install --force $(from) $$feat; then \
 			ok=$$((ok+1)); continue; \
 		fi; \
 		set -- $(CPU_FEATS); $(pick_feats); \
 		echo "  retry CPU for $$bin $$feat"; \
 		$(CUDA_CAP_HINT) \
-		if cargo install --force $$pkg $$feat; then \
+		if cargo install --force $(from) $$feat; then \
 			ok=$$((ok+1)); \
 		else \
 			failed="$$failed $$bin"; \
@@ -157,6 +175,26 @@ _install:
 	done; \
 	echo "done: $$ok ok"; \
 	if [ -n "$$failed" ]; then echo "failed:$$failed"; exit 1; fi
+
+# Agents (Claude Code) reach a tool through its `mcp` subcommand: each
+# installed binary that has one is registered for every project, once.
+mcp:
+	@command -v claude >/dev/null || { echo "claude (Claude Code) is not on PATH"; exit 1; }
+	@for bin in $(BINARIES); do \
+		command -v $$bin >/dev/null || continue; \
+		$$bin mcp --help >/dev/null 2>&1 || { echo "  $$bin: no mcp server in this version"; continue; }; \
+		if claude mcp get $$bin >/dev/null 2>&1; then \
+			echo "  $$bin: registered already"; \
+		else \
+			claude mcp add --scope user $$bin -- $$bin mcp >/dev/null && echo "  $$bin: registered"; \
+		fi; \
+	done
+	@echo "a new Claude Code session sees them; claude mcp list checks them"
+
+mcp-remove:
+	@for bin in $(BINARIES); do \
+		claude mcp get $$bin >/dev/null 2>&1 && claude mcp remove --scope user $$bin >/dev/null && echo "  $$bin: removed"; \
+	done; true
 
 uninstall:
 	@for bin in $(BINARIES); do \
