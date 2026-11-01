@@ -118,11 +118,13 @@ CPU_FEATS := $(if $(filter on,$(HDF5)),hdf5)
 CUDA_CAP_HINT := $(if $(filter cuda,$(BACKEND)$(if $(CUDA_COMPUTE_CAP),x)), \
 	echo "  hint: pass CUDA_COMPUTE_CAP=<cap> (e.g. 86)";)
 
-.PHONY: help install install-cpu install-cuda install-metal uninstall mcp mcp-remove
+.PHONY: help install install-cpu install-cuda install-metal update outdated uninstall mcp mcp-remove
 
 help:
 	@echo "legume-rs meta installer (crates.io only)"
-	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off]"
+	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off]   the newest release of each"
+	@echo "  make outdated      installed against the newest on crates.io"
+	@echo "  make update        install only the ones behind (same BACKEND/HDF5 options)"
 	@echo "  make mcp           how to connect the tools to an agent (legume init)"
 	@echo "  make mcp-remove    remove the user-wide Claude Code entries an older make mcp added"
 	@echo "  make uninstall"
@@ -139,7 +141,15 @@ install-cuda:
 install-metal:
 	@$(MAKE) _install BACKEND=metal
 
+# The newest legume-mcp (typst) needs Rust 1.92 or later.
+RUST_MIN := 1.92
+check_rust = rv=$$(rustc --version 2>/dev/null | cut -d' ' -f2); \
+	if [ -z "$$rv" ]; then echo "rustc is not on PATH: see https://rustup.rs"; exit 1; fi; \
+	if [ "$$(printf '%s\n' $(RUST_MIN) $$rv | sort -V | head -n1)" != "$(RUST_MIN)" ]; then \
+		echo "Rust $$rv is older than $(RUST_MIN), which the newest releases need: run rustup update"; exit 1; fi
+
 _install:
+	@$(check_rust)
 	@echo "Installing from crates.io (BACKEND=$(BACKEND) HDF5=$(HDF5))"
 	@ok=0; failed=; \
 	for bin in $(BINARIES); do \
@@ -160,6 +170,26 @@ _install:
 	done; \
 	echo "done: $$ok ok"; \
 	if [ -n "$$failed" ]; then echo "failed:$$failed"; exit 1; fi
+
+# $$pkg's newest version on crates.io ($$new) and the installed one ($$have).
+versions = new=$$(cargo search --limit 1 $$pkg 2>/dev/null | sed -n "s/^$$pkg = \"\([^\"]*\)\".*/\1/p"); \
+	have=$$(cargo install --list | sed -n "s/^$$pkg v\([^:]*\):$$/\1/p")
+
+outdated:
+	@for bin in $(BINARIES); do \
+		$(resolve_bin); $(versions); \
+		if [ -z "$$have" ]; then mark="not installed"; \
+		elif [ "$$have" = "$$new" ]; then mark="newest"; else mark="behind"; fi; \
+		printf "  %-11s %-12s installed %-8s crates.io %-8s %s\n" $$bin $$pkg "$${have:--}" "$${new:-?}" "$$mark"; \
+	done
+
+update:
+	@behind=; for bin in $(BINARIES); do \
+		$(resolve_bin); $(versions); \
+		[ -n "$$new" ] && [ "$$have" != "$$new" ] && behind="$$behind $$bin"; \
+	done; \
+	if [ -z "$$behind" ]; then echo "every tool is the newest release"; \
+	else echo "behind:$$behind"; $(MAKE) --no-print-directory install BINARIES="$$behind"; fi
 
 # Agents reach the tools per project: `legume init` in the project's folder
 # writes the settings for Claude Code, Codex, Cursor, VS Code, Gemini CLI,

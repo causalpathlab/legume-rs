@@ -19,6 +19,7 @@ keeps shared docs and a convenience `Makefile` that installs them.
 | `faba` | `faba` | [faba](https://github.com/causalpathlab/faba) |
 | `fqtl` | `fqtl-rs` | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
 | `data-beans`, `data-beans-sim` | `data-beans` | [data-beans](https://github.com/causalpathlab/data-beans) |
+| `legume` | `legume-mcp` | [legume-mcp](https://github.com/causalpathlab/legume-mcp) |
 
 Shared libraries: [`legume-numeric`](https://crates.io/crates/legume-numeric),
 [`legume-plot`](https://crates.io/crates/legume-plot),
@@ -33,7 +34,7 @@ Shared libraries: [`legume-numeric`](https://crates.io/crates/legume-numeric),
 
 ## Installation
 
-1. Install Rust via [`rustup`](https://rustup.rs/).
+1. Install Rust via [`rustup`](https://rustup.rs/) (1.92 or later; `rustup update` brings it up to date).
 2. Install everything `make` knows about:
 
 ```sh
@@ -52,6 +53,14 @@ cargo install mung-cnv
 cargo install faba
 cargo install fqtl-rs
 cargo install data-beans --features sim   # adds data-beans-sim
+cargo install legume-mcp --features pdf   # legume, with PDF reports
+```
+
+Each is the newest release on crates.io. To stay on the newest:
+
+```sh
+make outdated     # installed against crates.io
+make update       # reinstall only the ones behind
 ```
 
 `make install` picks a GPU backend (Metal on macOS, CUDA on Linux if `nvcc`
