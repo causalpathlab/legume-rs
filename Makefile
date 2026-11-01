@@ -1,7 +1,7 @@
 # =============================================================================
 # Binaries (all from crates.io)
 # =============================================================================
-BINARIES := senna lupin chickpea pinto cocoa mung faba data-beans
+BINARIES := senna lupin chickpea pinto cocoa mung faba data-beans legume
 
 # $$bin -> pkg / extra_feat / supported (must run inside a shell recipe).
 # `supported` lists the backend/HDF5 features the crate actually has, so we
@@ -15,6 +15,7 @@ resolve_bin = case $$bin in \
 	mung)       pkg=mung-cnv;    extra_feat=;    supported="cuda metal hdf5";; \
 	faba)       pkg=faba;        extra_feat=;    supported="hdf5";; \
 	data-beans) pkg=data-beans;  extra_feat=sim; supported="hdf5";; \
+	legume)     pkg=legume-mcp;  extra_feat=pdf; supported="";; \
 	*)          pkg=$$bin;       extra_feat=;    supported="";; \
 	esac
 
@@ -122,8 +123,8 @@ CUDA_CAP_HINT := $(if $(filter cuda,$(BACKEND)$(if $(CUDA_COMPUTE_CAP),x)), \
 help:
 	@echo "legume-rs meta installer (crates.io only)"
 	@echo "  make install [BACKEND=cpu|cuda|metal] [HDF5=on|off]"
-	@echo "  make mcp           register every installed tool with an \`mcp\` server in Claude Code"
-	@echo "  make mcp-remove    unregister them"
+	@echo "  make mcp           how to connect the tools to an agent (legume init)"
+	@echo "  make mcp-remove    remove the user-wide Claude Code entries an older make mcp added"
 	@echo "  make uninstall"
 	@echo "Binaries: $(BINARIES)"
 
@@ -160,20 +161,15 @@ _install:
 	echo "done: $$ok ok"; \
 	if [ -n "$$failed" ]; then echo "failed:$$failed"; exit 1; fi
 
-# Agents (Claude Code) reach a tool through its `mcp` subcommand: each
-# installed binary that has one is registered for every project, once.
+# Agents reach the tools per project: `legume init` in the project's folder
+# writes the settings for Claude Code, Codex, Cursor, VS Code, Gemini CLI,
+# Antigravity and opencode, and AGENTS.md. Records then land in that folder.
 mcp:
-	@command -v claude >/dev/null || { echo "claude (Claude Code) is not on PATH"; exit 1; }
-	@for bin in $(BINARIES); do \
-		command -v $$bin >/dev/null || continue; \
-		$$bin mcp --help >/dev/null 2>&1 || { echo "  $$bin: no mcp server in this version"; continue; }; \
-		if claude mcp get $$bin >/dev/null 2>&1; then \
-			echo "  $$bin: registered already"; \
-		else \
-			claude mcp add --scope user $$bin -- $$bin mcp >/dev/null && echo "  $$bin: registered"; \
-		fi; \
-	done
-	@echo "a new Claude Code session sees them; claude mcp list checks them"
+	@command -v legume >/dev/null || { echo "legume is not on PATH: make install first"; exit 1; }
+	@echo "In each project's folder, run:  legume init"
+	@echo "(legume init --help lists the agents; --claude, --codex, ... picks some)"
+	@echo "If an older make mcp registered the tools in Claude Code for every folder,"
+	@echo "make mcp-remove takes those entries out."
 
 mcp-remove:
 	@for bin in $(BINARIES); do \

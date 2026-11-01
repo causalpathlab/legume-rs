@@ -79,13 +79,20 @@ HDF5_DIR=/path/to/hdf5 make install
 ### Agents (MCP)
 
 Tools with an `mcp` subcommand serve an agent over the Model Context
-Protocol. `make mcp` registers each installed one with Claude Code, for
-every project. Tools whose installed version has no `mcp` are skipped:
+Protocol. `make install` also installs `legume` (from legume-mcp, with PDF
+reports; it needs Rust 1.92). In each project's folder, `legume init`
+connects every installed tool and the `legume` server to Claude Code, Codex,
+Cursor, VS Code, Gemini CLI, Antigravity and opencode, and writes
+`AGENTS.md`. The records land in that folder:
 
 ```sh
-make mcp          # e.g. claude mcp add --scope user pinto -- pinto mcp
-make mcp-remove
+cd my-project
+legume init       # or legume init --claude --codex to pick agents
+claude            # or codex, cursor-agent, ...
 ```
+
+An older `make mcp` registered the tools with Claude Code for every folder;
+`make mcp-remove` takes those entries out.
 
 `pinto view --follow` shows a person what an agent does on `pinto mcp`,
 in a terminal session of their own.
