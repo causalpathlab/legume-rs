@@ -5,7 +5,10 @@ BINARIES := senna lupin chickpea pinto cocoa mung faba data-beans legume
 
 # $$bin -> pkg / extra_feat / supported (must run inside a shell recipe).
 # `supported` lists the backend/HDF5 features the crate actually has, so we
-# never pass e.g. `--features metal` to faba or data-beans.
+# never pass e.g. `--features metal` to faba or data-beans. `extra_feat` holds
+# the opt-in features we always want (space-separated); the default ones
+# (senna/pinto `view`, chickpea `tui`, faba `mcp`, data-beans `tui`/`figure`/
+# `mcp`) come with the crate and need nothing here.
 resolve_bin = case $$bin in \
 	senna)      pkg=senna-rs;    extra_feat=;    supported="cuda metal hdf5";; \
 	lupin)      pkg=lupin-rs;    extra_feat=;    supported="cuda metal hdf5";; \
@@ -15,7 +18,7 @@ resolve_bin = case $$bin in \
 	mung)       pkg=mung-cnv;    extra_feat=;    supported="cuda metal hdf5";; \
 	faba)       pkg=faba;        extra_feat=;    supported="hdf5";; \
 	data-beans) pkg=data-beans;  extra_feat=sim; supported="hdf5";; \
-	legume)     pkg=legume-mcp;  extra_feat=pdf; supported="";; \
+	legume)     pkg=legume-mcp;  extra_feat="pdf benchmark"; supported="";; \
 	*)          pkg=$$bin;       extra_feat=;    supported="";; \
 	esac
 

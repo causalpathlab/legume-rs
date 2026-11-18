@@ -55,5 +55,5 @@ jobs:
               grep -qx "$f" <<<"$have" || { echo "::error::$pkg has no feature '$f'"; fail=1; }
             done
             echo "ok: $pkg [$feats]"
-          done < <(sed -nE 's/.*pkg=([^;$]+);[[:space:]]*extra_feat=([^;]*);[[:space:]]*supported="([^"]*)".*/\1 \2 \3/p' Makefile)
+          done < <(sed -nE 's/.*pkg=([^;$]+);[[:space:]]*extra_feat="?([^;"]*)"?;[[:space:]]*supported="([^"]*)".*/\1 \2 \3/p' Makefile)
           exit $fail

@@ -17,7 +17,6 @@ keeps shared docs and a convenience `Makefile` that installs them.
 | `cocoa` | `cocoa-rs` | [cocoa-rs](https://github.com/causalpathlab/cocoa-rs) |
 | `mung` | `mung-cnv` | [mung-cnv](https://github.com/causalpathlab/mung-cnv) |
 | `faba` | `faba` | [faba](https://github.com/causalpathlab/faba) |
-| `fqtl` | `fqtl-rs` | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
 | `data-beans`, `data-beans-sim` | `data-beans` | [data-beans](https://github.com/causalpathlab/data-beans) |
 | `legume` | `legume-mcp` | [legume-mcp](https://github.com/causalpathlab/legume-mcp) |
 
@@ -51,9 +50,8 @@ cargo install pinto-rs
 cargo install cocoa-rs
 cargo install mung-cnv
 cargo install faba
-cargo install fqtl-rs
 cargo install data-beans --features sim   # adds data-beans-sim
-cargo install legume-mcp --features pdf   # legume, with PDF reports
+cargo install legume-mcp --features pdf,benchmark   # legume, with PDF reports and benchmark
 ```
 
 Each is the newest release on crates.io. To stay on the newest:
@@ -89,7 +87,7 @@ HDF5_DIR=/path/to/hdf5 make install
 
 Tools with an `mcp` subcommand serve an agent over the Model Context
 Protocol. `make install` also installs `legume` (from legume-mcp, with PDF
-reports; it needs Rust 1.92). In each project's folder, `legume init`
+reports and `legume benchmark`/`score`/`universe`; it needs Rust 1.92). In each project's folder, `legume init`
 connects every installed tool and the `legume` server to Claude Code, Codex,
 Cursor, VS Code, Gemini CLI, Antigravity and opencode, and writes
 `AGENTS.md`. The records land in that folder:

@@ -20,7 +20,7 @@ install and backend notes.
 make install
 
 # or pick packages:
-cargo install senna-rs lupin-rs chickpea-rs pinto-rs cocoa-rs mung-cnv faba fqtl-rs
+cargo install senna-rs lupin-rs chickpea-rs pinto-rs cocoa-rs mung-cnv faba
 cargo install data-beans --features sim
 ```
 
@@ -35,5 +35,4 @@ cargo install data-beans --features sim
 | `cocoa` | `cargo install cocoa-rs` | [cocoa-rs](https://github.com/causalpathlab/cocoa-rs) |
 | `mung` | `cargo install mung-cnv` | [mung-cnv](https://github.com/causalpathlab/mung-cnv) |
 | `faba` | `cargo install faba` | [faba](https://github.com/causalpathlab/faba) |
-| `fqtl` | `cargo install fqtl-rs` | [fqtl-rs](https://github.com/causalpathlab/fqtl-rs) |
 | `data-beans` | `cargo install data-beans --features sim` | [data-beans](https://github.com/causalpathlab/data-beans) |
